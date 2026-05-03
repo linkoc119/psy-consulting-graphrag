@@ -1,0 +1,148 @@
+"""
+Chat router - handles chat requests
+"""
+import time
+import logging
+from typing import List, Dict
+from fastapi import APIRouter, HTTPException, Depends
+from ..models.schemas import (
+    ChatRequest, ChatResponse, ErrorResponse, ChatMessage
+)
+from ..services.rag_service import GraphRAGService
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/chat", tags=["chat"])
+
+# In-memory conversation store (in production, use Redis/DB)
+_conversations: Dict[str, List[Dict[str, str]]] = {}
+
+
+async def get_rag_service() -> GraphRAGService:
+    """Dependency to get RAG service instance"""
+    service = GraphRAGService()
+    try:
+        await service.initialize()
+        yield service
+    finally:
+        await service.close()
+
+
+@router.post(
+    "/completion",
+    response_model=ChatResponse,
+    responses={
+        400: {"model": ErrorResponse},
+        500: {"model": ErrorResponse}
+    }
+)
+async def chat_completion(
+    request: ChatRequest,
+    rag_service: GraphRAGService = Depends(get_rag_service)
+):
+    """
+    Get a response from the GraphRAG chatbot
+    
+    This endpoint processes user messages through:
+    1. Context retrieval (vector + graph)
+    2. Triage and prompt construction
+    3. LLM generation with streaming
+    
+    Returns the complete response with metadata
+    """
+    start_time = time.time()
+    
+    try:
+        # Get conversation history
+        conversation_id = request.conversation_id or f"conv_{int(time.time())}"
+        history = request.history or []
+        
+        # Ensure history is in correct format
+        formatted_history = []
+        for msg in history:
+            if isinstance(msg, ChatMessage):
+                formatted_history.append({
+                    "role": msg.role,
+                    "content": msg.content
+                })
+            else:
+                formatted_history.append(msg)
+        
+        # Store conversation for future reference
+        if conversation_id not in _conversations:
+            _conversations[conversation_id] = []
+        
+        # Add current user message to history
+        _conversations[conversation_id].append({
+            "role": "user",
+            "content": request.message
+        })
+        
+        # Generate response (streaming)
+        full_response = ""
+        async for chunk in rag_service.process_query(
+            query=request.message,
+            user_id=request.user_id,
+            conversation_history=formatted_history
+        ):
+            full_response += chunk
+        
+        # Add assistant response to history
+        _conversations[conversation_id].append({
+            "role": "assistant",
+            "content": full_response
+        })
+        
+        # Keep conversation history limited (last 20 messages)
+        if len(_conversations[conversation_id]) > 40:  # 20 exchanges
+            _conversations[conversation_id] = _conversations[conversation_id][-40:]
+        
+        # Calculate processing time
+        processing_time = (time.time() - start_time) * 1000
+        
+        # Determine severity and crisis mode (would come from RAG service in full impl)
+        # For now, we'll extract from response or set defaults
+        severity = 1  # Default - would be returned by rag_service
+        is_crisis = "KHẨN CẤP" in full_response.upper() or "CHUYỂN TUYẾN" in full_response.upper()
+        
+        # Build response
+        response = ChatResponse(
+            message=full_response,
+            conversation_id=conversation_id,
+            severity_level=severity,
+            is_crisis=is_crisis,
+            sources=[],  # Would be populated from context
+            processing_time_ms=processing_time
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error in chat_completion: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process chat request: {str(e)}"
+        )
+
+
+@router.get("/conversation/{conversation_id}")
+async def get_conversation(conversation_id: str) -> List[Dict[str, str]]:
+    """Get conversation history"""
+    return _conversations.get(conversation_id, [])
+
+
+@router.delete("/conversation/{conversation_id}")
+async def delete_conversation(conversation_id: str) -> Dict[str, str]:
+    """Delete conversation history"""
+    if conversation_id in _conversations:
+        del _conversations[conversation_id]
+        return {"message": f"Conversation {conversation_id} deleted"}
+    else:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+
+@router.post("/clear")
+async def clear_all_conversations() -> Dict[str, str]:
+    """Clear all conversation histories"""
+    global _conversations
+    _conversations.clear()
+    return {"message": "All conversations cleared"}

@@ -1,4 +1,110 @@
-# Byte-compiled / optimized / DLL files
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Data files
+data/
+*.jsonl
+*.json
+*.db
+*.sqlite
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Model cache (HuggingFace)
+.huggingface/
+.cache/
+transformers/
+sentence-transformers/
+
+# Ollama data (if local)
+.ollama/
+
+# Qdrant data
+qdrant_data/
+
+# Neo4j data
+neo4j_data/
+neo4j_logs/
+
+# Docker volumes
+docker-volumes/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend
+frontend/node_modules/
+frontend/build/
+frontend/.vite/
+frontend/dist/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.bak
+*.backup
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Local development
+.terraform/
+.terraform.lock.hcl# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class

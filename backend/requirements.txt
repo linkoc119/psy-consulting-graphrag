@@ -1,0 +1,37 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-dotenv==1.0.0
+
+# Database clients
+neo4j==5.15.0
+qdrant-client==1.14.1
+
+# ML & NLP
+pdfplumber==0.10.3
+
+# PyTorch (CPU version, for compatibility)
+torch>=2.1.0 --extra-index-url https://download.pytorch.org/whl/cpu
+
+transformers>=4.35.0
+sentence-transformers>=2.2.0
+
+# Ollama client
+ollama
+
+# Utilities
+numpy>=1.24.0
+pandas>=2.1.0
+requests==2.31.0
+python-multipart==0.0.6
+
+# LangChain (for text splitting)
+langchain-text-splitters>=0.2.0
+
+# Async support
+aiohttp==3.9.1
+
+# Required for transformers tokenizer
+tiktoken>=0.5.0
+sentencepiece>=0.2.0
