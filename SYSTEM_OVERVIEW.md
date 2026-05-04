@@ -217,35 +217,85 @@ Payload: {
 
 #### Phase 1: Retrieval (`_retrieve_context()`)
 
+**Complete GraphRAG Pipeline:**
+
 ```
-User Query → Embedding → Qdrant Search (top 15)
-                              ↓
-                       Extract node candidates
-                              ↓
-                       Neo4j Graph Traversal (depth=2)
-                              ↓
-                       Combine: Documents + Graph nodes
-                              ↓
-                       Rerank (Vietnamese_Reranker)
-                              ↓
-                       Top 10 contexts + severity detection
+User Query
+    ↓
+[1] Generate Embedding (Vietnamese_Embedding, 1024-dim)
+    ↓
+[2] Vector Search in Qdrant (top 15)
+    ├─ Returns document chunks with metadata
+    └─ Extract entity_ids from payloads (linked to graph nodes)
+    ↓
+[3] Graph Traversal in Neo4j (depth=2)
+    ├─ Start from entity_ids extracted from Qdrant results
+    ├─ Traverse only "golden" relationships:
+    │  • CO_TRIEU_CHUNG
+    │  • BAO_HIEU_NGUY_HIEM
+    │  • YEU_CAU_HANH_DONG
+    │  • DIEU_TRI_BANG
+    │  • QUAN_LY_BANG
+    │  • AP_DUNG_CHO
+    └─ Returns: graph_nodes + relationships
+    ↓
+[4] Reciprocal Rank Fusion (RRF)
+    ├─ Vector results have qdrant_rank (1-based)
+    ├─ Graph nodes have graph_rank (1-based)
+    ├─ RRF score = 1 / (k + rank), k=60
+    └─ Combined score = rrf_score (initial)
+    ↓
+[5] Reranking (Vietnamese_Reranker)
+    ├─ Prepare texts: documents + graph_nodes
+    ├─ Cross-encoder scores relevance to query
+    ├─ Map scores back to items
+    └─ Combined score = rrf_score + rerank_score
+    ↓
+[6] Final Selection
+    ├─ Sort by combined_score descending
+    ├─ Keep top 10 items total
+    └─ Separate: documents[] vs graph_nodes[]
+    ↓
+[7] Severity Detection
+    ├─ Check crisis keywords in query
+    ├─ Check severity_level from graph nodes
+    └─ Return severity (1-5) and red_flags
 ```
 
 **Returns:**
 ```python
 {
-    "documents": [...],      # Top document chunks
-    "graph_nodes": [...],    # Related graph entities
-    "relationships": [...],  # Graph edges
+    "documents": [...],      # Top 5-10 document chunks
+    "graph_nodes": [...],    # Top related graph entities
+    "relationships": [...],  # Graph edges from traversal
     "severity_indicators": {
         "level": 1-5,
         "red_flags": [...],
         "has_crisis_keywords": bool
     },
-    "query": "...",
-    "retrieval_time_ms": 123.45
+    "query": "..."
 }
 ```
+
+**Key Innovation: RRF Fusion**
+
+The system combines two independent retrieval signals:
+- **Vector search** (Qdrant): semantic similarity based on embedding
+- **Graph traversal** (Neo4j): knowledge-grounded entity expansion
+
+RRF formula: `score = 1 / (k + rank)` where k=60
+- This gives equal weight to both sources initially
+- Graph nodes with higher severity get better initial rank
+- Reranker then learns to weight sources based on query relevance
+
+**Example:** For query about "ảo giác" (hallucinations):
+- Qdrant returns doc about psychosis (rank 1)
+- Graph traversal from "Ảo thanh" node returns:
+  - `BenhLy: Tâm thần phân liệt` (severity 5)
+  - `DauHieuNguyHiem: Hoang tưởng` (severity 4)
+  - `HanhDongPFA: Chuyển tuyến` (severity 4)
+- RRF ranks these by position in each list
+- Reranker boosts items directly relevant to query
 
 #### Phase 2: Triage & Prompt Building (`_build_prompt()`)
 
@@ -255,23 +305,33 @@ User Query → Embedding → Qdrant Search (top 15)
 
 **Prompt Structure:**
 ```
-[FEW_SHOT_EXAMPLES]
+[FEW_SHOT_EXAMPLES]  # 3 examples relevant to mode
+
 === NGỮ CẢNH ===
-[Top 5 documents + Top 5 graph nodes]
+[Top 5 documents from Qdrant]
+[Top 5 graph nodes from Neo4j]
+
 === CÂU HỎI ===
 User query
+
 === PHẢN HỒI ===
+(LLM generates here)
 ```
 
 **System Prompts:**
 - `SYSTEM_PROMPT_COUNSELING` - 6-step counseling, no diagnosis
 - `SYSTEM_PROMPT_CRISIS` - PFA protocol, immediate referral
 
+**Context Formatting:**
+- Documents: `[{i}] ({doc_type}) {text[:500]}...`
+- Graph nodes: `[{i}] ({node_type}) {text[:300]}...`
+
 #### Phase 3: Generation (`process_query()`)
 
-- Stream response from LLM
-- Yield chunks to frontend
-- Return metadata (severity, crisis flag)
+- Stream response from LLM (Ollama)
+- Yield chunks to frontend via async generator
+- Store `last_context` for source extraction
+- Return metadata (severity, crisis flag) with full response
 
 ---
 
@@ -437,17 +497,63 @@ frontend/src/
 }
 ```
 
-### 2. Indexing Pipeline (TODO)
+### 2. Indexing Pipeline (GraphRAG Build)
 
-**Needs implementation:**
-1. Load chunks from JSONL
-2. Generate embeddings (Vietnamese_Embedding)
-3. Create Qdrant points with vectors
-4. Extract named entities → Create Neo4j nodes
-5. Build relationships from document structure
-6. Link DocumentChunks to graph entities
+**Script:** `backend/scripts/index_data.py`
 
-**Script:** `backend/scripts/index_data.py` (to be created)
+**Complete workflow:**
+
+```
+Load processed_chunks.jsonl
+    ↓
+[1] Generate Embeddings
+    └─ Vietnamese_Embedding → 1024-dim vectors (one per chunk)
+    ↓
+[2] Entity Extraction (per chunk)
+    ├─ Rule-based: Match against PREDEFINED_ENTITIES
+    ├─ Optional LLM: Qwen for dynamic entity extraction
+    └─ Returns: List of {name, type, description}
+    ↓
+[3] Create Graph Nodes (Neo4j)
+    ├─ MERGE each unique entity by normalized name
+    ├─ Map Vietnamese labels → English (BenhLy, TrieuChung, etc.)
+    └─ Set severity_level based on entity type
+    ↓
+[4] Create Relationships
+    ├─ Link entities that co-occur in same chunk
+    ├─ Infer relationship type from entity types
+    └─ Only create "golden" relationships (exclude noisy co-occurrence)
+    ↓
+[5] Link Chunks to Entities
+    └─ Create NAM_TRONG_CHUNK relationships
+    ↓
+[6] Upload to Qdrant
+    ├─ Each chunk becomes a point with:
+    │  • ID: sequential integer
+    │  • Vector: 1024-dim embedding
+    │  • Payload: chunk metadata + entity_ids[]
+    └─ entity_ids[] stores graph node IDs for traversal
+```
+
+**Key Insight:** The `entity_ids` field in Qdrant payload is the bridge between vector search and graph traversal. When a document chunk is retrieved, its linked entities become entry points for graph traversal.
+
+**Example Qdrant payload:**
+```json
+{
+  "page_content": "Ảo thanh là triệu chứng của tâm thần phân liệt...",
+  "source": "resources/pdtt.pdf",
+  "doc_type": "medical_guideline",
+  "chunk_id": "pdtt.pdf_p15_x1y2z3",
+  "entity_ids": ["TrieuChung_ao_thanh", "BenhLy_tam_than_phan_liet"]
+}
+```
+
+**Indexing command:**
+```bash
+docker exec psychology-backend python -m scripts.index_data --rechunk
+# or (skip rechunk if processed_chunks.jsonl exists)
+docker exec psychology-backend python -m scripts.index_data
+```
 
 ---
 
@@ -681,32 +787,47 @@ DEBUG=false
 
 ## 📊 Performance Considerations
 
-### Latency Breakdown (Typical)
+### Current Performance (Measured)
+
+**Latency Breakdown (Typical after optimizations):**
 
 | Step | Time (ms) | Notes |
 |------|-----------|-------|
-| Query embedding | 50-100 | Depends on GPU |
-| Qdrant search | 10-30 | Fast vector search |
-| Graph traversal | 20-50 | 2-hop traversal |
-| Reranking (top 20) | 100-200 | Cross-encoder inference |
-| LLM generation (stream) | 2000-5000 | 500-1000 tokens |
-| **Total** | **2300-5400** | ~3-6 seconds |
+| Query embedding | 80-150 | Vietnamese_Embedding (1024-dim) |
+| Qdrant search | 15-40 | HNSW search on 1039 points |
+| Graph traversal | 40-120 | 2-hop, ~30-50 nodes returned |
+| Reranking (~65 items) | 300-800 | Cross-encoder, batch size dependent |
+| LLM generation (stream) | 4000-12000 | 600-1500 tokens, CPU inference |
+| **Total** | **4500-14000** | ~5-15 seconds typical |
 
-### Optimization Opportunities
+**Bottlenecks:**
+1. **Reranker** (~300-800ms): Processing 60+ items with cross-encoder
+2. **LLM** (~4-12s): Qwen 2.5-3B on CPU (much faster on GPU)
+3. **Graph traversal** can be slow if too many nodes returned (before filtering)
 
-1. **Embedding cache:** Cache frequent query embeddings
-2. **Reranker batch:** Batch rerank requests
-3. **Graph pre-filter:** Filter graph by node type before traversal
-4. **Parallel retrieval:** Run Qdrant and graph in parallel
-5. **Model quantization:** Use 4-bit/8-bit for faster inference
-6. **Async streaming:** Already implemented
+**Optimizations Applied:**
+- Filter relationships to 6 golden types (excludes noisy co-occurrence)
+- Limit graph nodes to top 50 by severity before fusion
+- Keep total items for reranker to ~65 (15 docs + 50 graph)
+
+**Further Optimizations (Future):**
+1. **Embedding cache** - Redis cache for frequent query embeddings
+2. **Reranker batching** - Process multiple queries together
+3. **Early graph filtering** - Filter by node type before traversal
+4. **Model quantization** - Use 4-bit/8-bit embedding/reranker models
+5. **Adjust RRF k parameter** - Tune to weight vector vs graph differently
+6. **Reduce reranker top_k** - Currently uses all fused items (~65)
+7. **GPU acceleration** - Ensure all models use GPU if available
+8. **Async parallelization** - Already async; could add more concurrency
 
 ---
 
 ## 🚀 Future Enhancements
 
-### Phase 2 (Next)
-- [ ] Implement actual Neo4j population from PDFs
+### Phase 2 (Completed) ✅
+- [x] Implement Neo4j population from PDFs via `graph_indexer.py`
+- [x] Entity linking between Qdrant and Neo4j (entity_ids)
+- [x] GraphRAG retrieval with RRF fusion and reranking
 - [ ] Add Redis for conversation persistence
 - [ ] Implement rate limiting
 - [ ] Add user authentication
@@ -719,6 +840,9 @@ DEBUG=false
 - [ ] Conversation summarization for context management
 - [ ] Multi-modal support (images, voice)
 - [ ] Mobile app (React Native)
+- [ ] Advanced triage with ML classifier
+- [ ] Caching layer (Redis) for embeddings and queries
+- [ ] Batch processing for high-load scenarios
 
 ---
 
