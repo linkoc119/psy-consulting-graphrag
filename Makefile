@@ -32,14 +32,14 @@ help:
 quickstart:
 	@echo "Setting up GraphRAG Psychology Chatbot..."
 	@echo ""
-	@echo "1. Starting services..."
-	docker-compose up -d
+	@echo "1. Building and starting services..."
+	docker-compose up -d --build
 	@echo ""
 	@echo "2. Waiting for services to be ready..."
-	sleep 10
+	sleep 15
 	@echo ""
-	@echo "3. Installing dependencies (first time only)..."
-	docker exec psychology-backend pip install tiktoken sentencepiece || true
+	@echo "3. Pulling Qwen model..."
+	docker exec psychology-ollama ollama pull qwen2.5:3b || true
 	@echo ""
 	@echo "4. Running chunking and indexing..."
 	docker exec psychology-backend python -m scripts.index_data --clear-db --rechunk
@@ -51,7 +51,7 @@ quickstart:
 	@echo "To verify: make verify"
 
 start:
-	docker-compose up -d
+	docker-compose up -d --build
 	@echo "✅ Services started"
 	@echo "  UI: http://localhost:3000"
 	@echo "  API: http://localhost:8000"
