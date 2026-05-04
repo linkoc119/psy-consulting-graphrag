@@ -135,18 +135,25 @@ class GraphIndexer:
             chunk_node_id = await self._create_document_chunk_node(chunk, embeddings[i])
             
             for entity in entities:
-                entity_type = entity['type']
+                try:
+                    entity_type = entity['type']
+                except KeyError:
+                    logger.error(f"Entity missing 'type' field: {entity}")
+                    continue
                 entity_name = entity['name']
                 normalized_name = self._normalize_entity_name(entity_name)
-                
-                # Check if node already exists
-                node_id = await self._get_or_create_entity_node(
+
+                # Check if node already exists or create new
+                node_id, created = await self._get_or_create_entity_node(
                     entity_type, entity_name, normalized_name, chunk['metadata']
                 )
-                
+
                 if node_id:
+                    if created:
+                        stats["entities_created"] += 1
+
                     entity_map[(entity_type, normalized_name)] = node_id
-                    
+
                     # Create relationship: Entity -> DocumentChunk
                     relationships_to_create.append((
                         node_id,
@@ -302,8 +309,9 @@ Chỉ liệt kê những thực thể có trong văn bản. Tối đa 10 thực 
     
     def _normalize_entity_name(self, name: str) -> str:
         """Normalize entity name for deduplication"""
-        # Remove extra spaces, lowercase, remove diacritics for comparison?
-        # Keep Vietnamese diacritics, just normalize whitespace
+        if not name or not isinstance(name, str):
+            return ""
+        # Remove extra spaces, lowercase, keep Vietnamese diacritics
         return ' '.join(name.strip().lower().split())
     
     async def _get_or_create_entity_node(
@@ -312,48 +320,74 @@ Chỉ liệt kê những thực thể có trong văn bản. Tối đa 10 thực 
         entity_name: str,
         normalized_name: str,
         chunk_metadata: Dict[str, Any]
-    ) -> Optional[str]:
+    ) -> Tuple[str, bool]:
         """
         Get existing entity node or create new one
-        Returns node ID
+        Returns (node_id, created) where created is True if new node was created
         """
+        # Handle multiple entity types (e.g., "BenhLy|TrieuChung" from LLM)
+        # Use first type for consistency
+        primary_type = entity_type.split('|')[0] if '|' in entity_type else entity_type
+
+        # Mapping from Vietnamese entity type to valid Neo4j label
+        vn_to_label_map = {
+            "Bệnh lý": "BenhLy",
+            "Triệu chứng": "TrieuChung",
+            "Thuốc": "Thuoc",
+            "Kỹ năng tư vấn": "KyNangTuVan",
+            "Hành động PFA": "HanhDongPFA",
+            "Bước tư vấn": "BuocTuVan",
+            "Dấu hiệu nguy hiểm": "DauHieuNguyHiem",
+            "Đối tượng": "DoiTuong"
+        }
+
+        # Convert Vietnamese type to valid label
+        if primary_type in vn_to_label_map:
+            primary_type = vn_to_label_map[primary_type]
+        elif primary_type not in ["BenhLy", "TrieuChung", "Thuoc", "KyNangTuVan",
+                                  "HanhDongPFA", "BuocTuVan", "DauHieuNguyHiem", "DoiTuong"]:
+            # Unknown type - normalize by removing spaces
+            original_type = primary_type
+            primary_type = primary_type.replace(" ", "")
+            logger.warning(f"Unknown entity type '{original_type}', using normalized: {primary_type}")
+
         # Check if node exists by name and type
         query = f"""
-        MATCH (n:{entity_type} {{name: $name}})
+        MATCH (n:{primary_type} {{name: $name}})
         RETURN n.id as id
         LIMIT 1
         """
-        
+
         async with self.neo4j.driver.session() as session:
             result = await session.run(query, name=entity_name)
             record = await result.single()
-            
+
             if record:
-                return record["id"]
-            
+                return record["id"], False  # Existing node, not created
+
             # Create new node
             properties = {
-                "id": f"{entity_type}_{normalized_name}_{hash(entity_name) % 10000}",
+                "id": f"{primary_type}_{normalized_name}_{hash(entity_name) % 10000}",
                 "name": entity_name,
-                "source_domain": self._infer_source_domain(entity_type, chunk_metadata),
+                "source_domain": self._infer_source_domain(primary_type, chunk_metadata),
                 "created_from_chunk": True
             }
-            
+
             # Add severity if applicable
-            if entity_type in ["BenhLy", "TrieuChung", "DauHieuNguyHiem"]:
-                severity = self._get_default_severity(entity_type, entity_name)
+            if primary_type in ["BenhLy", "TrieuChung", "DauHieuNguyHiem"]:
+                severity = self._get_default_severity(primary_type, entity_name)
                 properties["severity_level"] = severity
-            
+
             # Add aliases if from predefined
             for entity_list in self.predefined_entities.values():
                 for entity in entity_list:
                     if entity['name'] == entity_name:
                         properties["aliases"] = entity.get('aliases', [])
                         break
-            
-            node_id = await self.neo4j.create_node(entity_type, properties)
-            logger.debug(f"Created node: {entity_type} - {entity_name}")
-            return node_id
+
+            node_id = await self.neo4j.create_node(primary_type, properties)
+            logger.debug(f"Created node: {primary_type} - {entity_name}")
+            return node_id, True  # New node created
     
     def _infer_source_domain(self, entity_type: str, chunk_metadata: Dict) -> str:
         """Infer source domain based on chunk metadata and entity type"""

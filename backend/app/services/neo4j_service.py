@@ -75,20 +75,19 @@ class Neo4jService:
         if node_id is None:
             import uuid
             node_id = str(uuid.uuid4())
-        
+
+        # Merge id into properties for Cypher compatibility
+        all_properties = {"id": node_id, **properties}
+
         query = f"""
-        CREATE (n:{label} {{
-            id: $id,
-            ... $properties
-        }})
+        CREATE (n:{label} $props)
         RETURN n.id as id
         """
-        
+
         async with self.driver.session() as session:
             result = await session.run(
                 query,
-                id=node_id,
-                properties=properties
+                props=all_properties
             )
             record = await result.single()
             return record["id"]
