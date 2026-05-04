@@ -161,24 +161,25 @@ class Neo4jService:
         if relationship_types:
             rel_list = "|".join(relationship_types)
             rel_filter = f":{rel_list}"
-        
+
         query = f"""
         MATCH (n)
         WHERE n.id IN $node_ids
         CALL apoc.path.subgraphAll(n, {{
             maxLevel: $depth,
-            relationshipFilter: '{rel_filter}' if '{rel_filter}' != '' else null,
+            relationshipFilter: $rel_filter,
             bfs: true
         }})
         YIELD nodes, relationships
         RETURN nodes, relationships
         """
-        
+
         async with self.driver.session() as session:
             result = await session.run(
                 query,
                 node_ids=node_ids,
-                depth=depth
+                depth=depth,
+                rel_filter=rel_filter  # Pass as parameter (empty string = all relationships)
             )
             record = await result.single()
             
@@ -187,7 +188,10 @@ class Neo4jService:
             
             nodes = []
             for node in record["nodes"]:
-                nodes.append(dict(node))
+                # Convert node to dict, including labels
+                node_dict = dict(node)
+                node_dict["labels"] = set(node.labels)  # Add labels set
+                nodes.append(node_dict)
             
             relationships = []
             for rel in record["relationships"]:

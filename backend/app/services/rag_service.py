@@ -17,6 +17,7 @@ from ..utils.prompts import (
     TRIAGE_GUIDELINES
 )
 from config import settings
+from ..models.graph_schema import NODE_LABELS, get_schema_info
 
 TRIAGE_THRESHOLD_HIGH = settings.TRIAGE_THRESHOLD_HIGH
 TRIAGE_THRESHOLD_MEDIUM = settings.TRIAGE_THRESHOLD_MEDIUM
@@ -54,11 +55,11 @@ class GraphRAGService:
         # Initialize Qdrant
         self.qdrant = QdrantService()
         self.qdrant.connect()
-        
+
         # Initialize Neo4j
-        self.neo4j = await Neo4jService()
+        self.neo4j = Neo4jService()
         await self.neo4j.connect()
-        
+
         logger.info("✅ All services initialized")
     
     async def process_query(
@@ -69,22 +70,26 @@ class GraphRAGService:
     ) -> AsyncGenerator[str, None]:
         """
         Main entry point: Process user query through GraphRAG pipeline
-        
+
         Args:
             query: User's message
             user_id: Optional user identifier
             conversation_history: Previous conversation turns
-            
+
         Yields:
             Streamed response chunks
         """
         try:
+            # Store retrieval context for later access (for sources)
+            self.last_context = None
+
             # Phase 1: Retrieval (Qdrant + Neo4j)
             context = await self._retrieve_context(query)
-            
+            self.last_context = context  # Store for sources
+
             # Phase 2: Triage & Prompt Building
             prompt, system_prompt, severity = await self._build_prompt(query, context, conversation_history)
-            
+
             # Phase 3: Generation
             async for chunk in self.llm.generate(
                 prompt=prompt,
@@ -92,97 +97,213 @@ class GraphRAGService:
                 system_prompt=system_prompt
             ):
                 yield chunk
-                
+
         except Exception as e:
             logger.error(f"Error in process_query: {e}")
             yield f"❌ Xin lỗi, đã xảy ra lỗi: {str(e)}"
     
     async def _retrieve_context(self, query: str) -> Dict[str, Any]:
         """
-        Retrieve relevant context from Qdrant and Neo4j
-        
+        Retrieve relevant context from Qdrant and Neo4j using GraphRAG
+
+        Pipeline:
+        1. Vector search (Qdrant) → top K documents
+        2. Extract entity IDs from document payloads
+        3. Graph traversal (Neo4j) from those entity IDs
+        4. RRF fusion of vector results + graph nodes
+        5. Rerank final results
+
         Returns:
             Dict with keys: documents, graph_nodes, relationships, severity_indicators
         """
         logger.info(f"Retrieving context for query: {query[:100]}...")
-        
+
         # Step 1: Generate query embedding
         query_embedding = self.embedding.encode_query(query)
-        
+
         # Step 2: Vector search in Qdrant
         vector_results = self.qdrant.search(
             query_vector=query_embedding,
             limit=15,
             with_payload=True
         )
-        
+
+        # Extract documents and entity IDs
         documents = []
+        entity_ids_from_docs = set()
+
         for res in vector_results:
             payload = res.get("payload", {})
-            documents.append({
+            doc = {
                 "text": payload.get("page_content", ""),
                 "metadata": {
-                    k: v for k, v in payload.items() if k != "page_content"
+                    k: v for k, v in payload.items()
+                    if k not in ["page_content", "embedding", "entity_ids"]
                 },
-                "score": res["score"]
-            })
-        
-        # Step 3: Extract potential graph nodes from top documents
-        # In a full implementation, we'd have node IDs stored in document payloads
-        # For now, we'll extract keywords and find matching nodes in Neo4j
+                "score": res["score"],
+                "qdrant_rank": len(documents) + 1  # Track rank for RRF
+            }
+            documents.append(doc)
+
+            # Collect entity IDs from payload
+            if "entity_ids" in payload:
+                for eid in payload["entity_ids"]:
+                    entity_ids_from_docs.add(eid)
+
+        logger.info(f"Vector search returned {len(documents)} docs, found {len(entity_ids_from_docs)} unique entity IDs")
+
+        # Step 3: Graph traversal from entity IDs
         graph_nodes = []
-        node_ids_from_docs = []
-        
-        for doc in documents[:5]:  # Use top 5 docs to extract node candidates
-            # This would ideally extract entity IDs from the document
-            # For prototype, we'll use a simple keyword match approach
-            pass
-        
-        # If we have node IDs, expand via graph traversal
         relationships = []
-        if node_ids_from_docs:
+
+        if entity_ids_from_docs:
+            # Only traverse meaningful relationships (exclude co-occurrence which is noisy)
+            # These are the "golden" relationships from schema
+            REL_TYPES_TO_TRAVERSE = [
+                "CO_TRIEU_CHUNG",
+                "BAO_HIEU_NGUY_HIEM",
+                "YEU_CAU_HANH_DONG",
+                "DIEU_TRI_BANG",
+                "QUAN_LY_BANG",
+                "AP_DUNG_CHO"
+            ]
+
+            # Get subgraph
             subgraph = await self.neo4j.get_subgraph(
-                node_ids=node_ids_from_docs,
-                depth=2
+                node_ids=list(entity_ids_from_docs),
+                depth=2,
+                relationship_types=REL_TYPES_TO_TRAVERSE
             )
-            graph_nodes = subgraph.get("nodes", [])
+            raw_nodes = subgraph.get("nodes", [])
             relationships = subgraph.get("relationships", [])
-        
-        # Step 4: Rerank all retrieved content
-        # Combine documents and graph nodes into a unified text representation
-        all_texts = [doc["text"] for doc in documents]
-        all_metadata = [doc["metadata"] for doc in documents]
-        
-        # Add graph node texts
+
+            # Normalize graph nodes
+            for node in raw_nodes:
+                # Extract label from labels set
+                labels = node.get("labels", set())
+                label = next(iter(labels)) if labels else "Unknown"
+
+                # Build text representation for reranker
+                node_text = f"{node.get('name', '')}"
+                description = node.get("description", "")
+                if description:
+                    node_text += f": {description}"
+
+                graph_nodes.append({
+                    "id": node.get("id"),
+                    "name": node.get("name", ""),
+                    "description": description,
+                    "label": label,
+                    "text": node_text,
+                    "severity_level": node.get("severity_level", 1),
+                    "graph_rank": len(graph_nodes) + 1  # Track rank for RRF
+                })
+
+            # Limit graph nodes before fusion to avoid reranker overload
+            # Keep top N by severity_level (higher = more important)
+            MAX_GRAPH_NODES_BEFORE_RERANK = 50
+            if len(graph_nodes) > MAX_GRAPH_NODES_BEFORE_RERANK:
+                graph_nodes.sort(key=lambda n: n.get("severity_level", 1), reverse=True)
+                graph_nodes = graph_nodes[:MAX_GRAPH_NODES_BEFORE_RERANK]
+                # Re-assign ranks after limiting
+                for i, node in enumerate(graph_nodes):
+                    node["graph_rank"] = i + 1
+
+        logger.info(f"Graph traversal returned {len(raw_nodes)} nodes, limited to {len(graph_nodes)} nodes, {len(relationships)} relationships")
+
+        # Step 4: RRF Fusion
+        # Convert graph nodes to text format for reranker
+        k = 60  # RRF constant
+
+        # Prepare items for fusion
+        fused_items = []
+
+        # Add vector documents
+        for doc in documents:
+            # Use chunk_id as unique identifier
+            item_id = doc["metadata"].get("chunk_id", f"doc_{id(doc)}")
+            # RRF score from vector search (lower rank = higher score)
+            rrf_score = 1.0 / (k + doc["qdrant_rank"])
+            fused_items.append({
+                "type": "document",
+                "item": doc,
+                "rrf_score": rrf_score,
+                "combined_score": rrf_score
+            })
+
+        # Add graph nodes (already normalized with text field)
         for node in graph_nodes:
-            node_text = f"{node.get('name', '')}: {node.get('description', '')}"
-            all_texts.append(node_text)
-            all_metadata.append({"source": "graph", "node_type": node.get("label")})
-        
+            # Use node.id as unique identifier
+            item_id = node.get("id", f"node_{id(node)}")
+            rrf_score = 1.0 / (k + node.get("graph_rank", 999))
+            # Build metadata for reranker
+            node_metadata = {
+                "source": "graph",
+                "node_type": node.get("label", ""),
+                "node_id": item_id,
+                "severity_level": node.get("severity_level", 1)
+            }
+            # Create item with all node properties + metadata
+            item = {
+                **node,  # Include id, name, description, label, text, severity_level, graph_rank
+                "metadata": node_metadata,
+                "score": node.get("severity_level", 1)
+            }
+            fused_items.append({
+                "type": "graph_node",
+                "item": item,
+                "rrf_score": rrf_score,
+                "combined_score": rrf_score
+            })
+
+        # Step 5: Rerank all fused items with Vietnamese_Reranker
+        # Prepare texts and metadata for reranker
+        all_texts = []
+        all_metadata = []
+        for fused in fused_items:
+            item = fused["item"]
+            all_texts.append(item["text"])
+            all_metadata.append(item["metadata"])
+
         # Rerank
         reranked = self.reranker.rerank(query, all_texts, all_metadata)
-        
+
+        # Map reranked results back to fused items
+        reranked_items = []
+        for text, score, meta in reranked:
+            # Find the corresponding fused item
+            for fused in fused_items:
+                item = fused["item"]
+                if item["text"] != text:
+                    continue
+                # For graph nodes, also match node_id in metadata
+                if fused["type"] == "graph_node":
+                    if item["metadata"].get("node_id") != meta.get("node_id"):
+                        continue
+                fused["rerank_score"] = score
+                fused["combined_score"] = fused["rrf_score"] + score  # Simple sum, can tune
+                reranked_items.append(fused)
+                break
+
+        # Sort by combined score
+        reranked_items.sort(key=lambda x: x["combined_score"], reverse=True)
+
         # Separate back into documents and graph nodes
         final_documents = []
         final_graph_nodes = []
-        
-        for text, score, meta in reranked[:10]:  # Keep top 10
-            if meta.get("source") == "graph":
-                final_graph_nodes.append({
-                    "text": text,
-                    "metadata": meta,
-                    "score": score
-                })
+
+        for fused in reranked_items[:10]:  # Keep top 10
+            item = fused["item"]
+            if fused["type"] == "document":
+                final_documents.append(item)
             else:
-                final_documents.append({
-                    "text": text,
-                    "metadata": meta,
-                    "score": score
-                })
-        
-        # Step 5: Detect severity indicators
-        severity_indicators = self._detect_severity_indicators(query, final_documents, final_graph_nodes)
-        
+                final_graph_nodes.append(item)
+
+        # Step 6: Detect severity indicators
+        severity_indicators = self._detect_severity_indicators(
+            query, final_documents, final_graph_nodes
+        )
+
         return {
             "documents": final_documents,
             "graph_nodes": final_graph_nodes,

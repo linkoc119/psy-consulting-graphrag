@@ -85,32 +85,57 @@ async def chat_completion(
             conversation_history=formatted_history
         ):
             full_response += chunk
-        
+
+        # Get retrieval context for sources
+        context = getattr(rag_service, 'last_context', None)
+        sources = []
+        if context:
+            # Add document sources
+            for doc in context.get('documents', [])[:5]:  # Top 5
+                meta = doc.get('metadata', {})
+                sources.append({
+                    'type': 'document',
+                    'title': meta.get('source_filename', 'Unknown'),
+                    'doc_type': meta.get('doc_type', ''),
+                    'score': float(doc.get('score', 0)),
+                    'text_preview': doc.get('text', '')[:200]
+                })
+            # Add graph node sources
+            for node in context.get('graph_nodes', [])[:5]:  # Top 5
+                sources.append({
+                    'type': 'graph_node',
+                    'title': node.get('name', 'Unknown'),
+                    'node_type': node.get('label', ''),
+                    'score': float(node.get('rerank_score', node.get('severity_level', 0))),
+                    'text_preview': node.get('text', '')[:200]
+                })
+
         # Add assistant response to history
         _conversations[conversation_id].append({
             "role": "assistant",
             "content": full_response
         })
-        
+
+        # Calculate processing time
+        processing_time = (time.time() - start_time) * 1000
+
         # Keep conversation history limited (last 20 messages)
         if len(_conversations[conversation_id]) > 40:  # 20 exchanges
             _conversations[conversation_id] = _conversations[conversation_id][-40:]
-        
-        # Calculate processing time
-        processing_time = (time.time() - start_time) * 1000
-        
-        # Determine severity and crisis mode (would come from RAG service in full impl)
-        # For now, we'll extract from response or set defaults
-        severity = 1  # Default - would be returned by rag_service
+
+        # Determine severity and crisis mode
+        severity = 1
+        if context:
+            severity = context.get('severity_indicators', {}).get('level', 1)
         is_crisis = "KHẨN CẤP" in full_response.upper() or "CHUYỂN TUYẾN" in full_response.upper()
-        
+
         # Build response
         response = ChatResponse(
             message=full_response,
             conversation_id=conversation_id,
             severity_level=severity,
             is_crisis=is_crisis,
-            sources=[],  # Would be populated from context
+            sources=sources,
             processing_time_ms=processing_time
         )
         

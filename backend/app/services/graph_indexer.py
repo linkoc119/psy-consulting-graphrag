@@ -105,35 +105,35 @@ class GraphIndexer:
         }
         
         logger.info(f"Starting indexing of {len(chunks)} chunks")
-        
+
         # Step 1: Generate embeddings for all chunks
         logger.info("Generating embeddings...")
         texts = [chunk['page_content'] for chunk in chunks]
         embeddings = self.embedding.encode_documents(texts)
-        
-        # Step 2: Upload chunks to Qdrant
-        logger.info("Uploading to Qdrant...")
-        points = self._prepare_qdrant_points(chunks, embeddings)
-        self.qdrant.upload_points(points, batch_size=batch_size)
-        stats["vectors_uploaded"] = len(points)
-        
-        # Step 3: Extract entities and build graph
+
+        # Step 2: Extract entities and build graph FIRST
+        # This populates entity nodes and creates relationships
         logger.info("Extracting entities and building graph...")
         entity_map = {}  # { (entity_type, normalized_name): node_id }
+        chunk_entity_ids = {}  # { chunk_id: [entity_id, ...] }
         relationships_to_create = []
-        
+
         for i, chunk in enumerate(chunks):
             logger.debug(f"Processing chunk {i+1}/{len(chunks)}")
-            
+
             # Extract entities from chunk
             if use_llm_for_extraction:
                 entities = await self._extract_entities_with_llm(chunk['page_content'])
             else:
                 entities = self._extract_entities_rule_based(chunk['page_content'])
-            
-            # Create/get nodes
+
+            # Create DocumentChunk node first
             chunk_node_id = await self._create_document_chunk_node(chunk, embeddings[i])
-            
+            chunk_id = chunk['metadata']['chunk_id']
+
+            # Track entities found in this chunk
+            entity_ids_this_chunk = []
+
             for entity in entities:
                 try:
                     entity_type = entity['type']
@@ -143,15 +143,13 @@ class GraphIndexer:
                 entity_name = entity['name']
                 normalized_name = self._normalize_entity_name(entity_name)
 
-                # Check if node already exists or create new
+                # Get or create entity node
                 node_id, created = await self._get_or_create_entity_node(
                     entity_type, entity_name, normalized_name, chunk['metadata']
                 )
 
                 if node_id:
-                    if created:
-                        stats["entities_created"] += 1
-
+                    entity_ids_this_chunk.append(node_id)
                     entity_map[(entity_type, normalized_name)] = node_id
 
                     # Create relationship: Entity -> DocumentChunk
@@ -161,7 +159,10 @@ class GraphIndexer:
                         "NAM_TRONG_CHUNK",
                         {"relevance_score": entity.get('confidence', 0.8)}
                     ))
-            
+
+            # Store entity IDs for this chunk (for Qdrant payload)
+            chunk_entity_ids[chunk_id] = entity_ids_this_chunk
+
             # Create relationships between entities in same chunk (co-occurrence)
             if len(entities) >= 2:
                 for j in range(len(entities)):
@@ -170,49 +171,67 @@ class GraphIndexer:
                             entities[j]['type'], entities[k]['type']
                         )
                         if rel_type:
-                            node1 = entity_map.get((entities[j]['type'], 
+                            node1 = entity_map.get((entities[j]['type'],
                                                   self._normalize_entity_name(entities[j]['name'])))
-                            node2 = entity_map.get((entities[k]['type'], 
+                            node2 = entity_map.get((entities[k]['type'],
                                                   self._normalize_entity_name(entities[k]['name'])))
                             if node1 and node2:
                                 relationships_to_create.append((
                                     node1, node2, rel_type, {"source": "co-occurrence"}
                                 ))
-            
+
             stats["chunks_indexed"] += 1
-        
-        # Step 4: Create all relationships in batch
+
+        # Step 3: Create all relationships in batch
         logger.info(f"Creating {len(relationships_to_create)} relationships...")
         for source_id, target_id, rel_type, props in relationships_to_create:
             await self.neo4j.create_relationship(source_id, target_id, rel_type, props)
             stats["relationships_created"] += 1
-        
-        # Step 5: Create additional relationships from predefined entities
+
+        # Step 4: Create additional relationships from predefined entities
         await self._create_predefined_relationships()
-        
+
+        # Step 5: Upload chunks to Qdrant WITH entity_ids
+        logger.info("Uploading to Qdrant...")
+        points = self._prepare_qdrant_points(chunks, embeddings, chunk_entity_ids)
+        self.qdrant.upload_points(points, batch_size=batch_size)
+        stats["vectors_uploaded"] = len(points)
+
         logger.info(f"✅ Indexing complete. Stats: {stats}")
         return stats
     
     def _prepare_qdrant_points(
-        self, 
-        chunks: List[Dict], 
-        embeddings: List[List[float]]
+        self,
+        chunks: List[Dict],
+        embeddings: List[List[float]],
+        chunk_entity_ids: Dict[str, List[str]] = None
     ) -> List[Any]:
-        """Prepare points for Qdrant upload"""
+        """Prepare points for Qdrant upload
+
+        Args:
+            chunks: List of chunk dictionaries
+            embeddings: List of embedding vectors
+            chunk_entity_ids: Mapping of chunk_id to list of entity node IDs
+        """
         from qdrant_client.http.models import PointStruct
-        
+
         points = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
             payload = chunk.copy()  # Includes page_content and metadata
-            payload["embedding"] = embedding  # Optional: store in payload
-            
+            payload["embedding"] = embedding
+
+            # Add entity IDs if available
+            chunk_id = chunk['metadata']['chunk_id']
+            if chunk_entity_ids and chunk_id in chunk_entity_ids:
+                payload["entity_ids"] = chunk_entity_ids[chunk_id]
+
             point = PointStruct(
                 id=i,
                 vector=embedding,
                 payload=payload
             )
             points.append(point)
-        
+
         return points
     
     def _extract_entities_rule_based(self, text: str) -> List[Dict[str, Any]]:
