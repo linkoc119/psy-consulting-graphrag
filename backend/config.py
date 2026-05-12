@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://ollama:11434"
     LLM_MODEL: str = "qwen2.5:3b"
     LLM_TEMPERATURE: float = 0.7
-    LLM_MAX_TOKENS: int = 2048
+    LLM_MAX_TOKENS: int = 512  # Optimized for 40-60s response time
 
     # Embedding Model
     EMBEDDING_MODEL: str = "AITeamVN/Vietnamese_Embedding"

@@ -33,6 +33,10 @@ class RerankerService:
                 self.model.to(self.device)
                 self.model.eval()
                 logger.info("✅ Reranker model loaded")
+                # Warm-up: run a dummy inference to avoid first-call latency
+                logger.info("Warming up reranker model...")
+                _ = self.rerank("warm up", ["dummy document"], [{}])
+                logger.info("✅ Reranker warm-up complete")
             except Exception as e:
                 logger.error(f"Failed to load reranker model: {e}")
                 raise

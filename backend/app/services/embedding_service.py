@@ -3,6 +3,7 @@ Embedding Service using Vietnamese_Embedding model
 """
 import logging
 from typing import List, Union, Optional
+from functools import lru_cache
 import torch
 from sentence_transformers import SentenceTransformer
 from config import settings
@@ -14,23 +15,47 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     """Service for generating embeddings using Vietnamese_Embedding"""
-    
+
     def __init__(self, model_name: str = EMBEDDING_MODEL):
         self.model_name = model_name
         self.model = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Set torch threads for CPU optimization
+        if self.device == "cpu":
+            torch.set_num_threads(4)  # Use 4 threads for CPU inference
+        # Cache for query embeddings (simple dict cache)
+        self._query_cache = {}
         logger.info(f"Initializing EmbeddingService on device: {self.device}")
-        
+
     def load_model(self):
         """Load the embedding model"""
         if self.model is None:
+            import time
             logger.info(f"Loading embedding model: {self.model_name}")
+            t0 = time.time()
             try:
                 self.model = SentenceTransformer(self.model_name, device=self.device)
-                logger.info(f"✅ Model loaded. Embedding dimension: {self.model.get_sentence_embedding_dimension()}")
+                load_time = time.time() - t0
+                dim = self.model.get_sentence_embedding_dimension()
+                logger.info(f"✅ Model loaded in {load_time*1000:.0f}ms. Embedding dimension: {dim}")
+                # Warm-up: run dummy inference to avoid first-call latency
+                logger.info("Warming up embedding model...")
+                t_warm = time.time()
+                _ = self.model.encode(
+                    ["warm up"],
+                    convert_to_numpy=True,
+                    normalize_embeddings=True
+                )
+                warm_time = time.time() - t_warm
+                logger.info(f"✅ Embedding warm-up complete in {warm_time*1000:.0f}ms")
             except Exception as e:
                 logger.error(f"Failed to load embedding model: {e}")
                 raise
+
+    @lru_cache(maxsize=100)
+    def encode_query_cached(self, query: str) -> List[float]:
+        """Generate embedding for a single query with caching"""
+        return self.encode_query(query)
     
     def encode(
         self, 
@@ -79,8 +104,13 @@ class EmbeddingService:
             raise
     
     def encode_query(self, query: str) -> List[float]:
-        """Generate embedding for a single query (normalized)"""
-        return self.encode(query, normalize_embeddings=True)[0]
+        """Generate embedding for a single query (normalized) with caching"""
+        if query in self._query_cache:
+            logger.debug(f"Embedding cache hit for query: {query[:50]}...")
+            return self._query_cache[query]
+        embedding = self.encode(query, normalize_embeddings=True)[0]
+        self._query_cache[query] = embedding
+        return embedding
     
     def encode_documents(self, documents: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple documents"""

@@ -26,32 +26,32 @@ logger = logging.getLogger(__name__)
 
 class GraphRAGService:
     """Main service for GraphRAG pipeline"""
-    
+
     def __init__(self):
         self.llm = None
         self.embedding = None
         self.reranker = None
         self.qdrant = None
         self.neo4j = None
-        
+
     async def initialize(self):
         """Initialize all services"""
         logger.info("Initializing GraphRAG services...")
-        
+
         # Initialize LLM
         self.llm = OllamaLLM()
         connected = await self.llm.check_connection()
         if not connected:
             raise RuntimeError("Ollama is not available. Please start Ollama and pull the model.")
-        
+
         # Initialize embedding service
         self.embedding = EmbeddingService()
         self.embedding.load_model()
-        
-        # Initialize reranker
+
+        # Initialize reranker and preload model
         self.reranker = RerankerService()
         self.reranker.load_model()
-        
+
         # Initialize Qdrant
         self.qdrant = QdrantService()
         self.qdrant.connect()
@@ -61,7 +61,7 @@ class GraphRAGService:
         await self.neo4j.connect()
 
         logger.info("✅ All services initialized")
-    
+
     async def process_query(
         self,
         query: str,
@@ -101,7 +101,7 @@ class GraphRAGService:
         except Exception as e:
             logger.error(f"Error in process_query: {e}")
             yield f"❌ Xin lỗi, đã xảy ra lỗi: {str(e)}"
-    
+
     async def _retrieve_context(self, query: str) -> Dict[str, Any]:
         """
         Retrieve relevant context from Qdrant and Neo4j using GraphRAG
@@ -116,17 +116,23 @@ class GraphRAGService:
         Returns:
             Dict with keys: documents, graph_nodes, relationships, severity_indicators
         """
+        import time
         logger.info(f"Retrieving context for query: {query[:100]}...")
+        t0 = time.time()
 
         # Step 1: Generate query embedding
+        t1 = time.time()
         query_embedding = self.embedding.encode_query(query)
+        logger.info(f"✅ Embedding generated in {(time.time()-t1)*1000:.0f}ms")
 
         # Step 2: Vector search in Qdrant
+        t1 = time.time()
         vector_results = self.qdrant.search(
             query_vector=query_embedding,
-            limit=15,
+            limit=8,  # Optimized: 8 docs for faster reranking
             with_payload=True
         )
+        logger.info(f"✅ Qdrant search returned {len(vector_results)} docs in {(time.time()-t1)*1000:.0f}ms")
 
         # Extract documents and entity IDs
         documents = []
@@ -150,9 +156,10 @@ class GraphRAGService:
                 for eid in payload["entity_ids"]:
                     entity_ids_from_docs.add(eid)
 
-        logger.info(f"Vector search returned {len(documents)} docs, found {len(entity_ids_from_docs)} unique entity IDs")
+        logger.info(f"Vector search: {len(documents)} docs, {len(entity_ids_from_docs)} unique entity IDs")
 
         # Step 3: Graph traversal from entity IDs
+        t1 = time.time()
         graph_nodes = []
         relationships = []
 
@@ -174,42 +181,54 @@ class GraphRAGService:
                 depth=2,
                 relationship_types=REL_TYPES_TO_TRAVERSE
             )
-            raw_nodes = subgraph.get("nodes", [])
-            relationships = subgraph.get("relationships", [])
+        raw_nodes = subgraph.get("nodes", [])
+        relationships = subgraph.get("relationships", [])
+        logger.info(f"✅ Graph traversal returned {len(raw_nodes)} nodes, {len(relationships)} rels in {(time.time()-t1)*1000:.0f}ms")
 
-            # Normalize graph nodes
-            for node in raw_nodes:
-                # Extract label from labels set
-                labels = node.get("labels", set())
-                label = next(iter(labels)) if labels else "Unknown"
+        # Normalize graph nodes
+        t1 = time.time()
+        for node in raw_nodes:
+            # Extract label from labels set
+            labels = node.get("labels", set())
+            label = next(iter(labels)) if labels else "Unknown"
 
-                # Build text representation for reranker
-                node_text = f"{node.get('name', '')}"
-                description = node.get("description", "")
-                if description:
-                    node_text += f": {description}"
+            # Build text representation for reranker
+            node_text = f"{node.get('name', '')}"
+            description = node.get("description", "")
+            if description:
+                node_text += f": {description}"
 
-                graph_nodes.append({
-                    "id": node.get("id"),
-                    "name": node.get("name", ""),
-                    "description": description,
-                    "label": label,
-                    "text": node_text,
-                    "severity_level": node.get("severity_level", 1),
-                    "graph_rank": len(graph_nodes) + 1  # Track rank for RRF
-                })
+            graph_nodes.append({
+                "id": node.get("id"),
+                "name": node.get("name", ""),
+                "description": description,
+                "label": label,
+                "text": node_text,
+                "severity_level": node.get("severity_level", 1),
+                "graph_rank": len(graph_nodes) + 1  # Track rank for RRF
+            })
 
-            # Limit graph nodes before fusion to avoid reranker overload
-            # Keep top N by severity_level (higher = more important)
-            MAX_GRAPH_NODES_BEFORE_RERANK = 50
-            if len(graph_nodes) > MAX_GRAPH_NODES_BEFORE_RERANK:
-                graph_nodes.sort(key=lambda n: n.get("severity_level", 1), reverse=True)
-                graph_nodes = graph_nodes[:MAX_GRAPH_NODES_BEFORE_RERANK]
-                # Re-assign ranks after limiting
-                for i, node in enumerate(graph_nodes):
-                    node["graph_rank"] = i + 1
+        # Limit graph nodes before fusion to avoid reranker overload
+        # Keep top N by severity_level (higher = more important)
+        MAX_GRAPH_NODES_BEFORE_RERANK = 15  # Optimized for speed: 15 instead of 25
+        if len(graph_nodes) > MAX_GRAPH_NODES_BEFORE_RERANK:
+            graph_nodes.sort(key=lambda n: n.get("severity_level", 1), reverse=True)
+            graph_nodes = graph_nodes[:MAX_GRAPH_NODES_BEFORE_RERANK]
+            # Re-assign ranks after limiting
+            for i, node in enumerate(graph_nodes):
+                node["graph_rank"] = i + 1
+        logger.info(f"Graph nodes limited to {len(graph_nodes)} (max {MAX_GRAPH_NODES_BEFORE_RERANK})")
 
-        logger.info(f"Graph traversal returned {len(raw_nodes)} nodes, limited to {len(graph_nodes)} nodes, {len(relationships)} relationships")
+        # Step 3.5: Filter and format relationships
+        # Only keep high-quality relationships to avoid token explosion
+        # Pass nodes list to resolve node names from IDs
+        filtered_relationships = self._filter_relationships(
+            relationships,
+            raw_nodes,
+            max_rels=60  # Optimized: 60 relationships for speed
+        )
+
+        logger.info(f"Graph traversal returned {len(raw_nodes)} nodes, limited to {len(graph_nodes)} nodes, relationships filtered to {len(filtered_relationships)}")
 
         # Step 4: RRF Fusion
         # Convert graph nodes to text format for reranker
@@ -292,7 +311,7 @@ class GraphRAGService:
         final_documents = []
         final_graph_nodes = []
 
-        for fused in reranked_items[:10]:  # Keep top 10
+        for fused in reranked_items[:8]:  # Keep top 8 for speed
             item = fused["item"]
             if fused["type"] == "document":
                 final_documents.append(item)
@@ -304,14 +323,130 @@ class GraphRAGService:
             query, final_documents, final_graph_nodes
         )
 
+        total_time = time.time() - t0
+        logger.info(f"✅ Retrieval complete in {total_time*1000:.0f}ms")
+        logger.info(f"Final: {len(final_documents)} docs, {len(final_graph_nodes)} graph nodes, {len(filtered_relationships)} rels")
+
         return {
             "documents": final_documents,
             "graph_nodes": final_graph_nodes,
-            "relationships": relationships,
+            "relationships": filtered_relationships,
             "severity_indicators": severity_indicators,
             "query": query
         }
-    
+
+    def _filter_relationships(
+        self,
+        relationships: List[Dict],
+        all_nodes: List[Dict],
+        max_rels: int = 150
+    ) -> List[str]:
+        """
+        Filter relationships to keep only high-quality ones and avoid token explosion
+
+        Strategy:
+        1. Keep only "golden" relationship types that encode medical knowledge
+        2. Filter by severity (higher severity = more important)
+        3. Remove duplicates (same source-target-type)
+        4. Limit total count
+        5. Format as text for prompt
+
+        Args:
+            relationships: List of relationship dicts with keys: type, start (node_id), end (node_id), properties
+            all_nodes: List of all graph nodes from Neo4j traversal (used to look up names)
+            max_rels: Maximum number of relationships to return
+
+        Returns:
+            List of formatted relationship strings
+        """
+        # Golden relationship types that represent actual medical knowledge
+        GOLDEN_REL_TYPES = {
+            "CO_TRIEU_CHUNG",      # Symptom co-occurrence
+            "BAO_HIEU_NGUY_HIEM",  # Danger sign indicator
+            "YEU_CAU_HANH_DONG",   # Required action
+            "DIEU_TRI_BANG",       # Treated by
+            "QUAN_LY_BANG",        # Managed by
+            "AP_DUNG_CHO"          # Applicable to
+        }
+
+        # Severity threshold: only keep relationships with severity >= 1
+        SEVERITY_THRESHOLD = 1
+
+        logger.info(f"Filtering {len(relationships)} raw relationships")
+
+        # Build node ID → name mapping for fast lookup
+        node_id_to_name = {}
+        for node in all_nodes:
+            node_id = node.get("id", "")
+            node_name = node.get("name", "")
+            if node_id and node_name:
+                node_id_to_name[node_id] = node_name
+
+        logger.debug(f"Built node_id→name map with {len(node_id_to_name)} entries")
+
+        # Deduplicate by (source_name, target_name, type)
+        seen = set()
+        filtered = []
+
+        for rel in relationships:
+            rel_type = rel.get("type", "")
+
+            # Step 1: Filter by golden relationship types
+            if rel_type not in GOLDEN_REL_TYPES:
+                logger.debug(f"Skipping relationship type: {rel_type}")
+                continue
+
+            # Step 2: Filter by severity (if available)
+            properties = rel.get("properties", {})
+            severity = properties.get("severity_level", 1)
+            if isinstance(severity, (int, float)) and severity < SEVERITY_THRESHOLD:
+                logger.debug(f"Skipping low severity: {severity} for type {rel_type}")
+                continue
+
+            # Step 3: Get node names from ID mapping (not from rel dict directly!)
+            start_id = rel.get("start", "")
+            end_id = rel.get("end", "")
+            start_name = node_id_to_name.get(start_id, "")
+            end_name = node_id_to_name.get(end_id, "")
+
+            # Debug logging for first few relationships
+            if len(filtered) < 3:
+                logger.debug(f"Rel: {rel_type}, start_id={start_id}, end_id={end_id}, start_name={start_name}, end_name={end_name}")
+
+            # Skip if names missing
+            if not start_name or not end_name:
+                logger.debug(f"Skipping relationship with missing names: start={start_name}, end={end_name}")
+                continue
+
+            # Step 4: Deduplicate
+            dedup_key = (start_name.lower().strip(), end_name.lower().strip(), rel_type)
+            if dedup_key in seen:
+                logger.debug(f"Duplicate relationship: {start_name} → {end_name} ({rel_type})")
+                continue
+            seen.add(dedup_key)
+
+            # Step 5: Format as readable text
+            # Format: "[REL_TYPE] Source → Target"
+            formatted = f"[{rel_type}] {start_name} → {end_name}"
+            filtered.append({
+                "text": formatted,
+                "type": rel_type,
+                "source": start_name,
+                "target": end_name,
+                "severity": severity
+            })
+
+        logger.info(f"After filtering: kept {len(filtered)} relationships (skipped {len(relationships) - len(filtered)})")
+
+        # Step 6: Sort by severity (desc) and limit
+        filtered.sort(key=lambda x: x.get("severity", 1), reverse=True)
+        limited = filtered[:max_rels]
+
+        logger.info(f"Final relationships count: {len(limited)} (top {max_rels})")
+
+        # Return only text for simplicity in prompt
+        return [item["text"] for item in limited]
+
     def _detect_severity_indicators(
         self,
         query: str,
@@ -320,7 +455,7 @@ class GraphRAGService:
     ) -> Dict[str, Any]:
         """
         Detect red flags and severity level from query and retrieved context
-        
+
         Returns:
             Dict with keys: level (1-5), red_flags (list), crisis_keywords (list)
         """
@@ -331,30 +466,30 @@ class GraphRAGService:
             "ảo giác", "nghe thấy tiếng nói", "hoang tưởng",
             "sẽ làm hại", "sẽ giết", "đe dọa"
         ]
-        
+
         query_lower = query.lower()
         detected = []
         for keyword in crisis_keywords:
             if keyword in query_lower:
                 detected.append(keyword)
-        
+
         # Check graph nodes for high severity labels
         max_severity = 1
         for node in graph_nodes:
             severity = node.get("metadata", {}).get("severity_level", 1)
             if isinstance(severity, (int, float)):
                 max_severity = max(max_severity, int(severity))
-        
+
         # If any crisis keyword detected, bump severity
         if detected:
             max_severity = max(max_severity, 4)
-        
+
         return {
             "level": max_severity,
             "red_flags": detected,
             "has_crisis_keywords": len(detected) > 0
         }
-    
+
     async def _build_prompt(
         self,
         query: str,
@@ -363,35 +498,42 @@ class GraphRAGService:
     ) -> tuple:
         """
         Build dynamic prompt based on severity and context
-        
+
         Returns:
             (prompt, system_prompt, severity_level)
         """
         severity = context["severity_indicators"]["level"]
         documents = context["documents"]
         graph_nodes = context["graph_nodes"]
-        
-        # Build context string
+        relationships = context.get("relationships", [])
+
+        # Build context string (balanced for quality vs speed)
         context_parts = []
-        
-        # Add document context
+
+        # Add document context (3 docs, 300 chars each)
         if documents:
             context_parts.append("=== TÀI LIỆU THAM KHẢO ===")
-            for i, doc in enumerate(documents[:5], 1):
+            for i, doc in enumerate(documents[:3], 1):
                 meta = doc["metadata"]
-                source = meta.get("source", "Unknown")
                 doc_type = meta.get("doc_type", "")
-                context_parts.append(f"[{i}] ({doc_type}) {doc['text'][:500]}...")
-        
-        # Add graph context
+                context_parts.append(f"[{i}] ({doc_type}) {doc['text'][:300]}...")
+
+        # Add graph nodes context (3 nodes, 200 chars each)
         if graph_nodes:
-            context_parts.append("\n=== MỐI LIÊN HỾT TRI THỨC ===")
-            for i, node in enumerate(graph_nodes[:5], 1):
+            context_parts.append("\n=== CÁC KHÁI NIỆM TRI THỨC LIÊN QUAN ===")
+            for i, node in enumerate(graph_nodes[:3], 1):
                 node_type = node.get("metadata", {}).get("node_type", "Unknown")
-                context_parts.append(f"[{i}] ({node_type}) {node['text'][:300]}...")
-        
+                context_parts.append(f"[{i}] ({node_type}) {node['text'][:200]}...")
+
+        # Add relationships context (10 relationships)
+        if relationships:
+            context_parts.append("\n=== CÁC MỐI LIÊN KẾT TRI THỨC ===")
+            context_parts.append("(Các mối liên hệ quan trọng):")
+            for i, rel in enumerate(relationships[:10], 1):
+                context_parts.append(f"  {i}. {rel}")
+
         context_str = "\n".join(context_parts) if context_parts else "Không có ngữ cảnh đặc biệt."
-        
+
         # Determine which system prompt to use
         if severity >= TRIAGE_THRESHOLD_HIGH:
             # Crisis mode - PFA
@@ -401,7 +543,7 @@ class GraphRAGService:
             # Normal counseling mode
             system_prompt = SYSTEM_PROMPT_COUNSELING
             few_shot = FEW_SHOT_COUNSELING
-        
+
         # Build main prompt
         prompt_parts = [
             few_shot,
@@ -411,13 +553,13 @@ class GraphRAGService:
             query,
             "\n=== PHẢN HỒI ==="
         ]
-        
+
         prompt = "\n".join(prompt_parts)
-        
+
         logger.info(f"Built prompt with severity={severity}, using {'CRISIS' if severity>=4 else 'COUNSELING'} mode")
-        
+
         return prompt, system_prompt, severity
-    
+
     async def close(self):
         """Close all connections"""
         if self.llm:
@@ -434,7 +576,7 @@ async def get_rag_response(
 ) -> AsyncGenerator[str, None]:
     """
     Get streaming response for a query
-    
+
     Usage:
         async for chunk in get_rag_response("Tôi cảm thấy lo lắng..."):
             print(chunk, end='', flush=True)

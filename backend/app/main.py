@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """
     Application lifespan events
-    - Startup: Initialize services, check connections
+    - Startup: Initialize services, check connections, pre-load ML models
     - Shutdown: Clean up resources
     """
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    
+
     # Startup checks
     try:
         # Check Ollama connection
@@ -38,31 +38,36 @@ async def lifespan(app: FastAPI):
         if not connected:
             logger.error("❌ Ollama is not available at startup")
             # Don't raise, let health check fail but start app anyway
-        
+
         # Check Qdrant connection and create collection if needed
         from .services.qdrant_service import get_qdrant_service
         qdrant = get_qdrant_service()
         qdrant.create_collection(force=False)
-        
+
         # Initialize Neo4j constraints
         from .services.neo4j_service import get_neo4j_service
         neo4j = await get_neo4j_service()
         await neo4j.create_constraints()
-        
-        logger.info("✅ All services initialized successfully")
-        
+
+        # PRE-LOAD ML MODELS for instant first response
+        logger.info("🔄 Pre-loading ML models (this may take 5-10 minutes)...")
+        from .services.rag_service import GraphRAGService
+        rag_service = GraphRAGService()
+        await rag_service.initialize()
+        app.state.rag_service = rag_service
+        logger.info("✅ All services initialized and models loaded - ready for instant response!")
+
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
         # Continue startup, but log error
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down application...")
     try:
-        from .services.llm_service import get_llm
-        llm = get_llm()
-        await llm.close()
+        if hasattr(app.state, 'rag_service'):
+            await app.state.rag_service.close()
         logger.info("✅ Services shut down cleanly")
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
@@ -73,7 +78,8 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="GraphRAG-based Psychology Chatbot for School Counseling",
-    lifespan=lifespan
+    lifespan=lifespan,
+    default_response_class=JSONResponse
 )
 
 # Configure CORS
@@ -84,6 +90,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Middleware to ensure UTF-8 encoding in responses
+@app.middleware("http")
+async def utf8_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Type"] = response.headers.get("Content-Type", "application/json") + "; charset=utf-8"
+    return response
 
 
 # Exception handlers

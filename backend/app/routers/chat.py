@@ -4,7 +4,7 @@ Chat router - handles chat requests
 import time
 import logging
 from typing import List, Dict
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from ..models.schemas import (
     ChatRequest, ChatResponse, ErrorResponse, ChatMessage
 )
@@ -17,14 +17,14 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 _conversations: Dict[str, List[Dict[str, str]]] = {}
 
 
-async def get_rag_service() -> GraphRAGService:
-    """Dependency to get RAG service instance"""
-    service = GraphRAGService()
-    try:
-        await service.initialize()
-        yield service
-    finally:
-        await service.close()
+async def get_rag_service(request: Request) -> GraphRAGService:
+    """Dependency to get pre-loaded RAG service instance from app.state"""
+    if not hasattr(request.app.state, 'rag_service'):
+        raise HTTPException(
+            status_code=503,
+            detail="RAG service not initialized. Please wait a moment and try again."
+        )
+    return request.app.state.rag_service
 
 
 @router.post(
@@ -41,21 +41,21 @@ async def chat_completion(
 ):
     """
     Get a response from the GraphRAG chatbot
-    
+
     This endpoint processes user messages through:
     1. Context retrieval (vector + graph)
     2. Triage and prompt construction
     3. LLM generation with streaming
-    
+
     Returns the complete response with metadata
     """
     start_time = time.time()
-    
+
     try:
         # Get conversation history
         conversation_id = request.conversation_id or f"conv_{int(time.time())}"
         history = request.history or []
-        
+
         # Ensure history is in correct format
         formatted_history = []
         for msg in history:
@@ -66,18 +66,18 @@ async def chat_completion(
                 })
             else:
                 formatted_history.append(msg)
-        
+
         # Store conversation for future reference
         if conversation_id not in _conversations:
             _conversations[conversation_id] = []
-        
+
         # Add current user message to history
         _conversations[conversation_id].append({
             "role": "user",
             "content": request.message
         })
-        
-        # Generate response (streaming)
+
+        # Generate response (streaming internally)
         full_response = ""
         async for chunk in rag_service.process_query(
             query=request.message,
@@ -138,9 +138,9 @@ async def chat_completion(
             sources=sources,
             processing_time_ms=processing_time
         )
-        
+
         return response
-        
+
     except Exception as e:
         logger.error(f"Error in chat_completion: {e}", exc_info=True)
         raise HTTPException(
