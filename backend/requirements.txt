@@ -11,8 +11,8 @@ qdrant-client==1.14.1
 # ML & NLP
 pdfplumber==0.10.3
 
-# PyTorch (CPU version, for compatibility)
-torch>=2.1.0 --extra-index-url https://download.pytorch.org/whl/cpu
+# PyTorch CPU-only (installed separately in Dockerfile)
+# torch is installed via --extra-index-url in Dockerfile
 
 transformers>=4.35.0
 sentence-transformers>=2.2.0
@@ -30,7 +30,7 @@ python-multipart==0.0.6
 langchain-text-splitters>=0.2.0
 
 # Async support
-aiohttp==3.9.1
+aiohttp>=3.9.0
 
 # Required for transformers tokenizer
 tiktoken>=0.5.0

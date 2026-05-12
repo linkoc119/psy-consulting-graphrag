@@ -3,7 +3,7 @@ import axios from 'axios'
 // Create axios instance
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000',
-  timeout: 60000, // 60 seconds for potentially long LLM responses
+  timeout: 300000, // 5 minutes for potentially long LLM responses
   headers: {
     'Content-Type': 'application/json',
   },
@@ -39,89 +39,36 @@ export const checkHealth = async (includeServices = false) => {
   return response.data
 }
 
-// Chat completion with streaming
+// Chat completion (non-streaming - returns full response)
 export const sendChatMessage = (
   message,
   conversationId = null,
   history = [],
   callbacks = {}
 ) => {
-  return new Promise((resolve, reject) => {
-    const payload = {
-      message,
-      conversation_id: conversationId,
-      history: history.map(msg => ({
-        role: msg.role,
-        content: msg.content
-      })),
-      user_id: null // Could be added later
-    }
+  const payload = {
+    message,
+    conversation_id: conversationId,
+    history: history.map(msg => ({
+      role: msg.role,
+      content: msg.content
+    })),
+    user_id: null
+  }
 
-    api.post('/chat/completion', payload, {
-      responseType: 'stream',
-      onUploadProgress: (progressEvent) => {
-        // Not used for small payloads
-      },
+  return api.post('/chat/completion', payload)
+    .then((response) => {
+      if (callbacks.onComplete) {
+        callbacks.onComplete(response.data)
+      }
+      return response.data
     })
-      .then(async (response) => {
-        const reader = response.data.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        const readStream = async () => {
-          try {
-            const { done, value } = await reader.read()
-            if (done) {
-              // Signal complete if we got a full response
-              if (callbacks.onComplete) {
-                // Parse the final message from accumulated data if needed
-                callbacks.onComplete({
-                  message: buffer,
-                  conversation_id: conversationId,
-                  severity_level: 1,
-                  is_crisis: false,
-                  sources: []
-                })
-              }
-              return resolve()
-            }
-
-            buffer += decoder.decode(value, { stream: true })
-            const lines = buffer.split('\n')
-            buffer = lines.pop() // Keep incomplete line in buffer
-
-            for (const line of lines) {
-              if (line.trim()) {
-                try {
-                  // Parse SSE data if needed, but backend returns raw text chunks
-                  // For now, treat each chunk as text
-                  if (callbacks.onChunk) {
-                    callbacks.onChunk(line)
-                  }
-                } catch (e) {
-                  console.warn('Failed to parse chunk:', e)
-                }
-              }
-            }
-
-            readStream()
-          } catch (error) {
-            if (callbacks.onError) {
-              callbacks.onError(error)
-            }
-            reject(error)
-          }
-        }
-
-        readStream()
-      })
-      .catch((error) => {
-        if (callbacks.onError) {
-          callbacks.onError(error)
-        }
-        reject(error)
-      })
-  })
+    .catch((error) => {
+      if (callbacks.onError) {
+        callbacks.onError(error)
+      }
+      throw error
+    })
 }
 
 // Get conversation history
