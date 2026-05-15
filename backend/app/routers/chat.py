@@ -127,7 +127,12 @@ async def chat_completion(
         severity = 1
         if context:
             severity = context.get('severity_indicators', {}).get('level', 1)
-        is_crisis = "KHẨN CẤP" in full_response.upper() or "CHUYỂN TUYẾN" in full_response.upper()
+        # Crisis mode: severity >= 4 OR query classified as crisis
+        is_crisis = severity >= 4
+        if context:
+            query_type = context.get('query_type', '')
+            if query_type == 'crisis':
+                is_crisis = True
 
         # Build response
         response = ChatResponse(

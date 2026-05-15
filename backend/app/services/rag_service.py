@@ -80,11 +80,14 @@ class GraphRAGService:
             Streamed response chunks
         """
         try:
+            import time
+            start_time = time.time()
+
             # Store retrieval context for later access (for sources)
             self.last_context = None
 
             # Phase 1: Retrieval (Qdrant + Neo4j)
-            context = await self._retrieve_context(query)
+            context = await self._retrieve_context(query, conversation_history)
             self.last_context = context  # Store for sources
 
             # Phase 2: Triage & Prompt Building
@@ -98,11 +101,15 @@ class GraphRAGService:
             ):
                 yield chunk
 
+            # Log total processing time
+            total_time = time.time() - start_time
+            logger.info(f"✅ Total response time: {total_time*1000:.0f}ms")
+
         except Exception as e:
             logger.error(f"Error in process_query: {e}")
             yield f"❌ Xin lỗi, đã xảy ra lỗi: {str(e)}"
 
-    async def _retrieve_context(self, query: str) -> Dict[str, Any]:
+    async def _retrieve_context(self, query: str, conversation_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Retrieve relevant context from Qdrant and Neo4j using GraphRAG
 
@@ -125,14 +132,78 @@ class GraphRAGService:
         query_embedding = self.embedding.encode_query(query)
         logger.info(f"✅ Embedding generated in {(time.time()-t1)*1000:.0f}ms")
 
-        # Step 2: Vector search in Qdrant
+        # Step 2: Classify query to determine appropriate document types
+        # Use conversation history for better context
+        query_type = self._classify_query_type(query, conversation_history)
+
+        # Step 3: Vector search in Qdrant with optional filtering
         t1 = time.time()
+        filter_conditions = None
+        if query_type == "counseling":
+            # For counseling queries, ONLY retrieve school_counseling docs
+            # This prevents medical_guideline docs (with severity 4-5) from triggering crisis mode
+            filter_conditions = {"metadata.doc_type": "school_counseling"}
+            logger.info(f"Applying filter: metadata.doc_type=school_counseling")
+        elif query_type == "crisis":
+            # For crisis queries, retrieve all document types (first_aid and medical_guideline are helpful)
+            logger.info(f"No filter applied for crisis query - retrieving all doc types")
+        else:
+            # General queries: retrieve all document types
+            logger.info(f"No filter applied for general query - retrieving all doc types")
+
         vector_results = self.qdrant.search(
             query_vector=query_embedding,
             limit=8,  # Optimized: 8 docs for faster reranking
+            filter_conditions=filter_conditions,
             with_payload=True
         )
         logger.info(f"✅ Qdrant search returned {len(vector_results)} docs in {(time.time()-t1)*1000:.0f}ms")
+
+        # Debug: Log scores if no results with filter
+        if len(vector_results) == 0 and filter_conditions:
+            # Try search without filter to see if there are any results at all
+            unfiltered = self.qdrant.search(
+                query_vector=query_embedding,
+                limit=3,
+                filter_conditions=None,
+                with_payload=True
+            )
+            if unfiltered:
+                logger.warning(f"Filtered search returned 0, but unfiltered returned {len(unfiltered)}. Sample scores: {[r.get('score', 0) for r in unfiltered]}")
+            else:
+                logger.warning(f"No results even without filter - embedding may not match any documents")
+
+        # Log document types retrieved
+        doc_types_retrieved = set()
+        for res in vector_results:
+            payload = res.get("payload", {})
+            metadata = payload.get("metadata", {})
+            doc_type = metadata.get("doc_type", payload.get("doc_type", "unknown"))
+            doc_types_retrieved.add(doc_type)
+        logger.info(f"Document types retrieved: {doc_types_retrieved}")
+
+        # Step 4: Fallback for counseling queries if filtered search returned too few results
+        if query_type == "counseling" and len(vector_results) < 3 and filter_conditions:
+            logger.warning(f"Filtered search returned only {len(vector_results)} results, falling back to unfiltered search")
+            # Re-run search without filter to get more results
+            fallback_results = self.qdrant.search(
+                query_vector=query_embedding,
+                limit=8,
+                filter_conditions=None,  # No filter
+                with_payload=True
+            )
+            # Merge results, deduplicate by chunk_id, keeping higher score
+            results_by_chunk = {}
+            for res in vector_results + fallback_results:
+                chunk_id = res.get("payload", {}).get("chunk_id", "")
+                if not chunk_id:
+                    continue
+                score = res.get("score", 0)
+                if chunk_id not in results_by_chunk or score > results_by_chunk[chunk_id]["score"]:
+                    results_by_chunk[chunk_id] = res
+            # Rebuild vector_results sorted by score (descending)
+            vector_results = sorted(results_by_chunk.values(), key=lambda x: x.get("score", 0), reverse=True)[:8]
+            logger.info(f"After fallback: {len(vector_results)} total results")
 
         # Extract documents and entity IDs
         documents = []
@@ -162,6 +233,9 @@ class GraphRAGService:
         t1 = time.time()
         graph_nodes = []
         relationships = []
+
+        # Initialize subgraph to avoid "variable not associated with a value" error
+        subgraph = {"nodes": [], "relationships": []}
 
         if entity_ids_from_docs:
             # Only traverse meaningful relationships (exclude co-occurrence which is noisy)
@@ -332,7 +406,8 @@ class GraphRAGService:
             "graph_nodes": final_graph_nodes,
             "relationships": filtered_relationships,
             "severity_indicators": severity_indicators,
-            "query": query
+            "query": query,
+            "query_type": query_type
         }
 
     def _filter_relationships(
@@ -447,6 +522,61 @@ class GraphRAGService:
         # Return only text for simplicity in prompt
         return [item["text"] for item in limited]
 
+    def _classify_query_type(self, query: str, conversation_history: Optional[List[Dict]] = None) -> str:
+        """
+        Classify query type to determine which document types should be retrieved.
+        Uses both current query AND conversation history for better context.
+
+        Query types:
+        - "crisis": Contains crisis keywords (self-harm, harm to others, abuse, hallucinations)
+          Should retrieve: first_aid, medical_guideline (any doc type, no filter)
+        - "counseling": School counseling topics (anxiety, stress, relationships, study, future)
+          Should retrieve: school_counseling ONLY (exclude medical/first_aid to avoid severity contamination)
+        - "general": Other queries, retrieve all document types
+
+        Returns:
+            "crisis", "counseling", or "general"
+        """
+        crisis_keywords = [
+            "tự tử", "tự làm hại", "muốn chết", "kết thúc cuộc sống",
+            "cắt tay", "tự đánh", "bỏ ăn", "bỏ học",
+            "bị bạo lực", "bị xâm hại", "bị đánh", "bị làm nhục",
+            "ảo giác", "nghe thấy tiếng nói", "hoang tưởng",
+            "sẽ làm hại", "sẽ giết", "đe dọa", "tự sát",
+            "cô lập", "bỏ nhà", "chạy trốn"
+        ]
+
+        counseling_keywords = [
+            "lo lắng", "áp lực", "căng thẳng", "stress",
+            "bạn bè", "bạn thân", "mâu thuẫn", "cãi nhau",
+            "học tập", "thi cử", " điểm", "tương lai",
+            "nghề nghiệp", "gia đình", "cha mẹ", "anh chị",
+            "tự tin", "self-esteem", "khả năng", "cảm thấy"
+        ]
+
+        # Combine current query with conversation history for better context
+        full_text = query.lower()
+        if conversation_history:
+            for msg in conversation_history:
+                content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, 'content', '')
+                if content:
+                    full_text += " " + content.lower()
+
+        # Check for crisis keywords first (higher priority)
+        for keyword in crisis_keywords:
+            if keyword in full_text:
+                logger.info(f"Query classified as CRISIS due to keyword: '{keyword}'")
+                return "crisis"
+
+        # Check for counseling keywords
+        for keyword in counseling_keywords:
+            if keyword in full_text:
+                logger.info(f"Query classified as COUNSELING due to keyword: '{keyword}'")
+                return "counseling"
+
+        logger.info(f"Query classified as GENERAL (no specific keywords detected)")
+        return "general"
+
     def _detect_severity_indicators(
         self,
         query: str,
@@ -455,6 +585,10 @@ class GraphRAGService:
     ) -> Dict[str, Any]:
         """
         Detect red flags and severity level from query and retrieved context
+
+        IMPORTANT: Graph nodes with high severity (4-5) should ONLY trigger crisis mode
+        if the query itself contains crisis keywords. This prevents false positives
+        from co-occurrence in the knowledge graph.
 
         Returns:
             Dict with keys: level (1-5), red_flags (list), crisis_keywords (list)
@@ -473,19 +607,26 @@ class GraphRAGService:
             if keyword in query_lower:
                 detected.append(keyword)
 
-        # Check graph nodes for high severity labels
-        max_severity = 1
+        # Check graph nodes for severity levels
+        # NOTE: Only use graph severity if crisis keywords present in query
+        # to avoid false positives from co-occurrence relationships
+        max_graph_severity = 1
         for node in graph_nodes:
             severity = node.get("metadata", {}).get("severity_level", 1)
             if isinstance(severity, (int, float)):
-                max_severity = max(max_severity, int(severity))
+                max_graph_severity = max(max_graph_severity, int(severity))
 
-        # If any crisis keyword detected, bump severity
+        # Determine final severity
         if detected:
-            max_severity = max(max_severity, 4)
+            # Crisis keywords in query → severity at least 4
+            severity_level = max(max_graph_severity, 4)
+        else:
+            # No crisis keywords → cap severity at 3 (moderate max)
+            # Even if graph has severity 4-5 nodes, they're from co-occurrence
+            severity_level = min(max_graph_severity, 3)
 
         return {
-            "level": max_severity,
+            "level": severity_level,
             "red_flags": detected,
             "has_crisis_keywords": len(detected) > 0
         }
