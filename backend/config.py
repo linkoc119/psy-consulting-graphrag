@@ -13,11 +13,22 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
-    # Ollama LLM settings
-    OLLAMA_BASE_URL: str = "http://ollama:11434"
-    LLM_MODEL: str = "qwen2.5:3b"
-    LLM_TEMPERATURE: float = 0.7
-    LLM_MAX_TOKENS: int = 512  # Optimized for 40-60s response time
+    # LLM settings - Support both Ollama and Claude API
+    # Use LLM_PROVIDER="ollama" or "claude" to switch
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")  # "ollama" or "claude"
+
+    # Ollama settings (used only if LLM_PROVIDER=ollama)
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+
+    # Claude/Anthropic API settings (used if LLM_PROVIDER=claude)
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    ANTHROPIC_API_BASE: str = os.getenv("ANTHROPIC_API_BASE", "http://localhost:20128/v1")
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+
+    # Common LLM settings
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "512"))
 
     # Embedding Model
     EMBEDDING_MODEL: str = "AITeamVN/Vietnamese_Embedding"

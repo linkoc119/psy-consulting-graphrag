@@ -20,6 +20,9 @@ sentence-transformers>=2.2.0
 # Ollama client
 ollama
 
+# Anthropic Claude API client
+anthropic>=0.34.0
+
 # Utilities
 numpy>=1.24.0
 pandas>=2.1.0
