@@ -9,24 +9,25 @@ const theme = createTheme({
   palette: {
     mode: 'light',
     primary: {
-      main: '#1976d2',
+      main: '#43766C',
+      light: '#7091F5',
     },
     secondary: {
-      main: '#dc004e',
+      main: '#F8FAE5',
     },
     background: {
-      default: '#f5f5f5',
+      default: '#F5F7F8', // Nền xám cực nhẹ
+      paper: '#ffffff',
     },
   },
   typography: {
-    fontFamily: [
-      'Roboto',
-      '"Noto Sans Vietnamese"',
-      'Arial',
-      'sans-serif'
-    ].join(','),
+    fontFamily: ['"Inter"', '"Noto Sans Vietnamese"', '"Roboto"', 'sans-serif'].join(','),
+    h4: { fontWeight: 700, color: '#1A3C40' },
   },
-})
+  shape: {
+    borderRadius: 12, 
+  },
+});
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

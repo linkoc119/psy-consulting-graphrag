@@ -54,26 +54,42 @@ function App() {
   }
 
   return (
-    <Container maxWidth="lg" style={{ marginTop: 20, marginBottom: 20 }}>
-      <Box textAlign="center" mb={3}>
-        <Typography variant="h4" component="h1" gutterBottom color="primary">
-          🤖 Chatbot Tư vấn Tâm lý Học đường
+    <Container maxWidth="lg" sx={{ py: 3, height: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <Box textAlign="center" mb={4}>
+        <Typography 
+          variant="h2" 
+          component="h1" 
+          sx={{ 
+            fontWeight: 900, 
+            color: '#43766C', 
+            textTransform: 'uppercase',
+            textShadow: '2px 2px 4px rgba(0,0,0,0.1)',
+            fontSize: { xs: '2.2rem', md: '3.8rem' },
+            mb: 1
+          }}
+        >
+          Chatbot Tư Vấn Tâm Lý Học Đường
         </Typography>
-        <Typography variant="subtitle1" color="textSecondary">
-          Hệ thống hỗ trợ tư vấn tâm lý sử dụng GraphRAG
+        <Typography variant="h6" color="textSecondary" sx={{ fontStyle: 'italic', opacity: 0.8 }}>
+          Hệ thống hỗ trợ thông minh dựa trên mô hình GraphRAG
         </Typography>
-        <Box mt={2}>
-          <Typography variant="caption" color="textSecondary">
-            LLM: Qwen 2.5-3B (Ollama) | Vector DB: Qdrant | Graph DB: Neo4j
-          </Typography>
-        </Box>
       </Box>
 
-      <Paper elevation={3} style={{ padding: 20, minHeight: '70vh', display: 'flex', flexDirection: 'column' }}>
+      <Paper 
+        elevation={4} 
+        sx={{ 
+          flex: 1, 
+          display: 'flex', 
+          flexDirection: 'column', 
+          borderRadius: 4,
+          overflow: 'hidden', 
+          mb: 2
+        }}
+      >
         <ChatInterface />
       </Paper>
 
-      <Box mt={2} textAlign="center">
+      <Box textAlign="center" pb={1}>
         <Typography variant="caption" color="textSecondary">
           ⚠️ Hệ thống chỉ cung cấp hỗ trợ tư vấn ban đầu. Trong trường hợp khẩn cấp, vui lòng liên hệ dịch vụ chuyên nghiệp.
         </Typography>

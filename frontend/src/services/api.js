@@ -40,35 +40,28 @@ export const checkHealth = async (includeServices = false) => {
 }
 
 // Chat completion (non-streaming - returns full response)
-export const sendChatMessage = (
-  message,
-  conversationId = null,
-  history = [],
-  callbacks = {}
-) => {
-  const payload = {
-    message,
-    conversation_id: conversationId,
-    history: history.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    })),
-    user_id: null
-  }
+export const sendChatMessage = async (message, conversationId, history, callbacks) => {
+  try {
+    const payload = {
+      message,
+      conversation_id: conversationId,
+      history: history.map(msg => ({ role: msg.role, content: msg.content })),
+      user_id: null
+    };
 
-  return api.post('/chat/completion', payload)
-    .then((response) => {
-      if (callbacks.onComplete) {
-        callbacks.onComplete(response.data)
-      }
-      return response.data
-    })
-    .catch((error) => {
-      if (callbacks.onError) {
-        callbacks.onError(error)
-      }
-      throw error
-    })
+    const response = await api.post('/chat/completion', payload);
+    
+    // Trả về object dữ liệu đã được parse sẵn
+    if (callbacks.onComplete) {
+      callbacks.onComplete(response.data);
+    }
+    return response.data;
+  } catch (error) {
+    if (callbacks.onError) {
+      callbacks.onError(error);
+    }
+    throw error;
+  }
 }
 
 // Get conversation history
