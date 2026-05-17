@@ -45,7 +45,6 @@ env/
 # Data files
 data/
 *.jsonl
-*.json
 *.db
 *.sqlite
 
