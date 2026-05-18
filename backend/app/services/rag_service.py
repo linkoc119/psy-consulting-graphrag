@@ -161,7 +161,7 @@ class GraphRAGService:
 
         vector_results = self.qdrant.search(
             query_vector=query_embedding,
-            limit=8,  # Optimized: 8 docs for faster reranking
+            limit=5,  # Reduced from 8 to 5 for faster reranking
             filter_conditions=filter_conditions,
             with_payload=True
         )
@@ -298,7 +298,7 @@ class GraphRAGService:
 
         # Limit graph nodes before fusion to avoid reranker overload
         # Keep top N by severity_level (higher = more important)
-        MAX_GRAPH_NODES_BEFORE_RERANK = 15  # Optimized for speed: 15 instead of 25
+        MAX_GRAPH_NODES_BEFORE_RERANK = 5  # Reduced from 15 to 5 for CPU/GPU optimization
         if len(graph_nodes) > MAX_GRAPH_NODES_BEFORE_RERANK:
             graph_nodes.sort(key=lambda n: n.get("severity_level", 1), reverse=True)
             graph_nodes = graph_nodes[:MAX_GRAPH_NODES_BEFORE_RERANK]
@@ -363,7 +363,15 @@ class GraphRAGService:
                 "combined_score": rrf_score
             })
 
-        # Step 5: Rerank all fused items with Vietnamese_Reranker
+        # Step 5: Limit items before reranking for speed
+        # Cross-encoder reranking is slow on CPU, limit to top 10 by RRF score
+        MAX_ITEMS_BEFORE_RERANK = 10
+        fused_items.sort(key=lambda x: x["rrf_score"], reverse=True)
+        if len(fused_items) > MAX_ITEMS_BEFORE_RERANK:
+            logger.info(f"Limited items before rerank: {len(fused_items)} → {MAX_ITEMS_BEFORE_RERANK}")
+            fused_items = fused_items[:MAX_ITEMS_BEFORE_RERANK]
+
+        # Rerank all fused items with Vietnamese_Reranker
         # Prepare texts and metadata for reranker
         all_texts = []
         all_metadata = []
@@ -372,7 +380,7 @@ class GraphRAGService:
             all_texts.append(item["text"])
             all_metadata.append(item["metadata"])
 
-        # Rerank
+        logger.info(f"Reranking {len(all_texts)} items...")
         reranked = self.reranker.rerank(query, all_texts, all_metadata)
 
         # Map reranked results back to fused items
