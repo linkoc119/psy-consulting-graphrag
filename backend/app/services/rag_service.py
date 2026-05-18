@@ -94,6 +94,9 @@ class GraphRAGService:
             prompt, system_prompt, severity = await self._build_prompt(query, context, conversation_history)
 
             # Phase 3: Generation
+            import time
+            gen_start_time = time.time()
+
             async for chunk in self.llm.generate(
                 prompt=prompt,
                 stream=True,
@@ -101,8 +104,13 @@ class GraphRAGService:
             ):
                 yield chunk
 
+            gen_time = time.time() - gen_start_time
+            logger.info(f"✅ LLM generation time: {gen_time*1000:.0f}ms")
+
             # Log total processing time
             total_time = time.time() - start_time
+            retrieval_time = gen_start_time - start_time - (getattr(self, '_prompt_build_time', 0))
+            logger.info(f"✅ Retrieval time: {retrieval_time*1000:.0f}ms")
             logger.info(f"✅ Total response time: {total_time*1000:.0f}ms")
 
         except Exception as e:
@@ -249,10 +257,16 @@ class GraphRAGService:
                 "AP_DUNG_CHO"
             ]
 
-            # Get subgraph
+            # Limit entities to prevent graph explosion (depth=2 with many entities = thousands of relationships)
+            MAX_ENTITIES_FOR_TRAVERSAL = 3
+            entity_ids_list = list(entity_ids_from_docs)[:MAX_ENTITIES_FOR_TRAVERSAL]
+            if len(entity_ids_from_docs) > MAX_ENTITIES_FOR_TRAVERSAL:
+                logger.info(f"Limited entities for traversal: {len(entity_ids_from_docs)} → {MAX_ENTITIES_FOR_TRAVERSAL}")
+
+            # Get subgraph with limited entities and depth=1 for speed + quality
             subgraph = await self.neo4j.get_subgraph(
-                node_ids=list(entity_ids_from_docs),
-                depth=2,
+                node_ids=entity_ids_list,
+                depth=1,
                 relationship_types=REL_TYPES_TO_TRAVERSE
             )
         raw_nodes = subgraph.get("nodes", [])
