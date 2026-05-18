@@ -10,8 +10,14 @@ services:
     environment:
       - OLLAMA_HOST=0.0.0.0
       - OLLAMA_PORT=11434
-    # For GPU support, uncomment the following line (requires NVIDIA Container Toolkit):
-    # runtime: nvidia
+    # GPU support for Ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/11434' || exit 1"]
       interval: 30s
@@ -92,6 +98,14 @@ services:
         condition: service_healthy
     networks:
       - graphrag-network
+    # GPU support - uncomment for NVIDIA GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/ready"]
       interval: 30s

@@ -14,14 +14,18 @@ logger = logging.getLogger(__name__)
 
 class RerankerService:
     """Service for reranking retrieved documents using Vietnamese_Reranker"""
-    
+
     def __init__(self, model_name: str = RERANKER_MODEL, top_k: int = RERANKER_TOP_K):
         self.model_name = model_name
         self.top_k = top_k
         self.model = None
         self.tokenizer = None
+        # Auto-detect GPU if available
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Initializing RerankerService on device: {self.device}")
+        if self.device == "cuda":
+            logger.info(f"Reranker will use GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CUDA'}")
+        else:
+            logger.info("Reranker will use CPU (no GPU detected)")
     
     def load_model(self):
         """Load the reranker model and tokenizer"""
@@ -167,6 +171,7 @@ def get_reranker_service() -> RerankerService:
     global _reranker_instance
     if _reranker_instance is None:
         _reranker_instance = RerankerService()
+        logger.info(f"Reranker service created on device: {_reranker_instance.device}")
     return _reranker_instance
 
 
