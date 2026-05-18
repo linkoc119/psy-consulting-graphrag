@@ -14,13 +14,12 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
-    # --- Cấu hình thiết bị chạy AI ---
-    # Card 4GB nên để Backend (Embedding/Reranker) chạy CPU để nhường GPU cho Ollama
+    # Device settings 
     DEVICE: str = os.getenv("DEVICE", "cpu") 
     EMBEDDING_DEVICE: Optional[str] = os.getenv("EMBEDDING_DEVICE", "cpu")
     RERANKER_DEVICE: Optional[str] = os.getenv("RERANKER_DEVICE", "cpu")
 
-    # --- LLM settings ---
+    # LLM settings 
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
 
     # Claude settings
@@ -36,14 +35,11 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.3  # Giảm xuống 0.3 để câu trả lời ngắn gọn, súc tích và nhanh hơn
     LLM_MAX_TOKENS: int = 512
 
-    # --- Retrieval Optimization (Cực kỳ quan trọng để giảm 77s) ---
-    # Giới hạn số lượng đoạn văn bản lấy từ Vector DB trước khi Rerank
-    # Giảm xuống sẽ giúp phần Retrieval chạy nhanh hơn rất nhiều
+    # Vector Search settings
     VECTOR_SEARCH_TOP_K: int = 10 
     
     # Reranker Model
     RERANKER_MODEL: str = "AITeamVN/Vietnamese_Reranker"
-    # Chỉ lấy ra 3 kết quả tốt nhất cuối cùng để đưa vào Prompt (giảm tải cho LLM)
     RERANKER_TOP_K: int = 3 
 
     # Embedding Model

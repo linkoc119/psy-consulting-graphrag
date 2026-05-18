@@ -1,6 +1,5 @@
 import axios from 'axios'
 
-// Create axios instance
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || 'http://localhost:8000',
   timeout: 300000, // 5 minutes for potentially long LLM responses
@@ -9,7 +8,6 @@ const api = axios.create({
   },
 })
 
-// Request interceptor for logging
 api.interceptors.request.use(
   (config) => {
     console.log(`API Request: ${config.method?.toUpperCase()} ${config.url}`)
@@ -21,7 +19,6 @@ api.interceptors.request.use(
   }
 )
 
-// Response interceptor
 api.interceptors.response.use(
   (response) => {
     console.log(`API Response: ${response.status} ${response.config.url}`)
@@ -33,13 +30,11 @@ api.interceptors.response.use(
   }
 )
 
-// Health check
 export const checkHealth = async (includeServices = false) => {
   const response = await api.get(`/health?include_services=${includeServices}`)
   return response.data
 }
 
-// Chat completion (non-streaming - returns full response)
 export const sendChatMessage = async (message, conversationId, history, callbacks) => {
   try {
     const payload = {
@@ -51,7 +46,6 @@ export const sendChatMessage = async (message, conversationId, history, callback
 
     const response = await api.post('/chat/completion', payload);
     
-    // Trả về object dữ liệu đã được parse sẵn
     if (callbacks.onComplete) {
       callbacks.onComplete(response.data);
     }
@@ -64,19 +58,16 @@ export const sendChatMessage = async (message, conversationId, history, callback
   }
 }
 
-// Get conversation history
 export const getConversation = async (conversationId) => {
   const response = await api.get(`/chat/conversation/${conversationId}`)
   return response.data
 }
 
-// Delete conversation
 export const deleteConversation = async (conversationId) => {
   const response = await api.delete(`/chat/conversation/${conversationId}`)
   return response.data
 }
 
-// Clear all conversations
 export const clearAllConversations = async () => {
   const response = await api.post('/chat/clear')
   return response.data

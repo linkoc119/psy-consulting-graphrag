@@ -16,7 +16,7 @@ const theme = createTheme({
       main: '#F8FAE5',
     },
     background: {
-      default: '#F5F7F8', // Nền xám cực nhẹ
+      default: '#F5F7F8',
       paper: '#ffffff',
     },
   },

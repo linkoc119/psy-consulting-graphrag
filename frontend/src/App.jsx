@@ -9,7 +9,6 @@ function App() {
   const [healthStatus, setHealthStatus] = useState(null)
   const [healthError, setHealthError] = useState(null)
 
-  // Check backend health on mount
   React.useEffect(() => {
     const checkBackend = async () => {
       try {

@@ -11,9 +11,7 @@ qdrant-client==1.14.1
 # ML & NLP
 pdfplumber==0.10.3
 
-# PyTorch CPU-only (installed separately in Dockerfile)
-# torch is installed via --extra-index-url in Dockerfile
-
+# Transformers and Sentence Transformers
 transformers>=4.35.0
 sentence-transformers>=2.2.0
 
