@@ -1,8 +1,9 @@
 """
 Configuration settings for the GraphRAG Psychology Chatbot
+Optimized for RTX 3050 4GB VRAM
 """
 import os
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -13,48 +14,59 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
-    # LLM settings - Support both Ollama and Claude API
-    # Use LLM_PROVIDER="ollama" or "claude" to switch
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")  # "ollama" or "claude"
+    # --- Cấu hình thiết bị chạy AI ---
+    # Card 4GB nên để Backend (Embedding/Reranker) chạy CPU để nhường GPU cho Ollama
+    DEVICE: str = os.getenv("DEVICE", "cpu") 
+    EMBEDDING_DEVICE: Optional[str] = os.getenv("EMBEDDING_DEVICE", "cpu")
+    RERANKER_DEVICE: Optional[str] = os.getenv("RERANKER_DEVICE", "cpu")
 
-    # Ollama settings (used only if LLM_PROVIDER=ollama)
-    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+    # --- LLM settings ---
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
 
-    # Claude/Anthropic API settings (used if LLM_PROVIDER=claude)
+    # Claude settings
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     ANTHROPIC_API_BASE: str = os.getenv("ANTHROPIC_API_BASE", "http://localhost:20128/v1")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
+    # Ollama settings
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct-q6_K") 
+
     # Common LLM settings
-    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "512"))
+    LLM_TEMPERATURE: float = 0.3  # Giảm xuống 0.3 để câu trả lời ngắn gọn, súc tích và nhanh hơn
+    LLM_MAX_TOKENS: int = 512
+
+    # --- Retrieval Optimization (Cực kỳ quan trọng để giảm 77s) ---
+    # Giới hạn số lượng đoạn văn bản lấy từ Vector DB trước khi Rerank
+    # Giảm xuống sẽ giúp phần Retrieval chạy nhanh hơn rất nhiều
+    VECTOR_SEARCH_TOP_K: int = 10 
+    
+    # Reranker Model
+    RERANKER_MODEL: str = "AITeamVN/Vietnamese_Reranker"
+    # Chỉ lấy ra 3 kết quả tốt nhất cuối cùng để đưa vào Prompt (giảm tải cho LLM)
+    RERANKER_TOP_K: int = 3 
 
     # Embedding Model
     EMBEDDING_MODEL: str = "AITeamVN/Vietnamese_Embedding"
-    EMBEDDING_DIMENSION: int = 1024  # Actual dimension of the model
-
-    # Reranker Model
-    RERANKER_MODEL: str = "AITeamVN/Vietnamese_Reranker"
-    RERANKER_TOP_K: int = 5
+    EMBEDDING_DIMENSION: int = 1024
 
     # Qdrant Vector DB
-    QDRANT_URL: str = "http://qdrant:6333"
+    QDRANT_URL: str = os.getenv("QDRANT_URL", "http://qdrant:6333")
     QDRANT_COLLECTION_NAME: str = "psychology_chunks"
-    QDRANT_VECTOR_SIZE: int = 1024  # Must match EMBEDDING_DIMENSION
+    QDRANT_VECTOR_SIZE: int = 1024
 
     # Neo4j Graph DB
-    NEO4J_URI: str = "bolt://neo4j:7687"
-    NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "password"
+    NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+    NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")
 
     # GraphRAG settings
     SEVERITY_LEVELS: List[int] = [1, 2, 3, 4, 5]
-    TRIAGE_THRESHOLD_HIGH: int = 4  # severity >= 4 → Crisis/PFA
-    TRIAGE_THRESHOLD_MEDIUM: int = 3  # severity 2-3 → Counseling
-    TRIAGE_THRESHOLD_LOW: int = 1  # severity 1 → General
+    TRIAGE_THRESHOLD_HIGH: int = 4
+    TRIAGE_THRESHOLD_MEDIUM: int = 3
+    TRIAGE_THRESHOLD_LOW: int = 1
 
-    # Chunking settings (used by chunk processor)
+    # Chunking settings
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 150
 
@@ -65,5 +77,6 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore" 
 
 settings = Settings()

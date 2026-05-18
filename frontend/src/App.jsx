@@ -44,7 +44,7 @@ function App() {
             {healthError || 'Một hoặc nhiều dịch vụ backend không hoạt động. Vui lòng kiểm tra:'}
           </Typography>
           <ul>
-            <li>Ollama đang chạy và đã pull model qwen2.5:3b</li>
+            <li>Ollama đang chạy và đã pull model</li>
             <li>Qdrant và Neo4j đang chạy</li>
             <li>Backend API đang chạy tại port 8000</li>
           </ul>
