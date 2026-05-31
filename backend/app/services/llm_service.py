@@ -1,12 +1,16 @@
+import asyncio
+import json
+import logging
+from typing import AsyncGenerator, Optional, List, Dict, Any
+
+import aiohttp
+
+from config import settings
+
 """
 LLM Service for GraphRAG Psychology Chatbot
-Supports both Ollama and Anthropic Claude API
+Supports Ollama, Anthropic Claude API, and OpenAI-compatible chat completions
 """
-import logging
-import aiohttp
-import asyncio
-from typing import AsyncGenerator, Optional, List, Dict, Any
-from config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -74,19 +78,18 @@ class OllamaLLM(BaseLLM):
     ) -> AsyncGenerator[str, None]:
         session = await self._ensure_session()
 
-        if system_prompt:
-            full_prompt = f"{system_prompt}\n\n{prompt}"
-        else:
-            full_prompt = prompt
-
         payload = {
             "model": self.model,
-            "prompt": full_prompt,
+            "prompt": prompt,
             "stream": stream,
-            "temperature": self.temperature,
-            "num_predict": self.max_tokens,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.max_tokens,
+            },
             **kwargs
         }
+        if system_prompt:
+            payload["system"] = system_prompt
 
         url = f"{self.base_url}/api/generate"
 
@@ -357,6 +360,156 @@ class ClaudeLLM(BaseLLM):
             await self.session.close()
 
 
+class OpenAICompatibleLLM(BaseLLM):
+    """OpenAI-compatible /v1/chat/completions wrapper."""
+
+    def __init__(
+        self,
+        api_key: str = settings.OPENAI_API_KEY,
+        api_base: str = settings.OPENAI_API_BASE,
+        model: str = settings.OPENAI_MODEL,
+        temperature: float = settings.LLM_TEMPERATURE,
+        max_tokens: int = settings.LLM_MAX_TOKENS
+    ):
+        self.api_key = api_key
+        self.api_base = api_base.rstrip('/')
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+        return self.session
+
+    def _build_payload(
+        self,
+        prompt: str,
+        stream: bool,
+        system_prompt: Optional[str],
+        **kwargs
+    ) -> Dict[str, Any]:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        return {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            **kwargs
+        }
+
+    async def generate(
+        self,
+        prompt: str,
+        stream: bool = True,
+        system_prompt: Optional[str] = None,
+        **kwargs
+    ) -> AsyncGenerator[str, None]:
+        session = await self._ensure_session()
+        payload = self._build_payload(prompt, stream, system_prompt, **kwargs)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        url = f"{self.api_base}/chat/completions"
+
+        try:
+            logger.debug(f"Generating with OpenAI-compatible {self.model}, stream={stream}")
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=300)
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"OpenAI-compatible error {response.status}: {error_text}")
+                    raise RuntimeError(f"OpenAI-compatible API error: {error_text}")
+
+                if stream:
+                    async for line in response.content:
+                        line_str = line.decode("utf-8").strip()
+                        if not line_str or not line_str.startswith("data: "):
+                            continue
+
+                        data = line_str[6:].strip()
+                        if data == "[DONE]":
+                            break
+
+                        try:
+                            chunk_data = json.loads(data)
+                            choices = chunk_data.get("choices", [])
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content")
+                            if content:
+                                yield content
+                        except Exception as e:
+                            logger.debug(f"Error parsing OpenAI stream chunk: {e}")
+                            continue
+                else:
+                    data = await response.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        yield choices[0].get("message", {}).get("content", "")
+
+        except Exception as e:
+            logger.error(f"Error generating OpenAI-compatible response: {e}")
+            yield f"❌ Lỗi: {str(e)}"
+
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        system_prompt: Optional[str] = None
+    ) -> str:
+        prompt = "\n\n".join(
+            f"{msg.get('role', 'user').upper()}: {msg.get('content', '')}"
+            for msg in messages
+        )
+        return await self.generate_text(prompt, system_prompt=system_prompt)
+
+    async def check_connection(self) -> bool:
+        if not self.api_key:
+            logger.error("OpenAI-compatible API key is missing")
+            return False
+
+        try:
+            session = await self._ensure_session()
+            payload = self._build_payload("ping", False, None, max_tokens=1)
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            }
+            url = f"{self.api_base}/chat/completions"
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    logger.info(f"✅ OpenAI-compatible API is running with model {self.model}")
+                    return True
+
+                error_text = await response.text()
+                logger.error(f"OpenAI-compatible connection failed {response.status}: {error_text}")
+                return False
+        except Exception as e:
+            logger.error(f"Cannot connect to OpenAI-compatible API: {e}")
+            return False
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+
 # Singleton instances
 _llm_instance: Optional[BaseLLM] = None
 
@@ -370,6 +523,8 @@ def get_llm() -> BaseLLM:
             _llm_instance = OllamaLLM()
         elif provider == "claude":
             _llm_instance = ClaudeLLM()
+        elif provider in ("openai", "openai_compatible"):
+            _llm_instance = OpenAICompatibleLLM()
         else:
             raise ValueError(f"Unknown LLM provider: {provider}")
     return _llm_instance

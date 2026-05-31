@@ -16,6 +16,45 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 # In-memory conversation store (in production, use Redis/DB)
 _conversations: Dict[str, List[Dict[str, str]]] = {}
 
+PROMPT_LEAK_PREFIXES = (
+    "Xây dựng quan hệ",
+    "Làm rõ vấn đề",
+    "Đã thử gì",
+    "Thời gian/tần suất",
+    "Lựa chọn giải pháp",
+    "Triển khai",
+    "Lượng giá",
+    "Theo dõi",
+    "Người dùng",
+    "Trợ lý",
+    "Mẫu phong cách",
+)
+
+
+def remove_prompt_leakage(text: str) -> str:
+    """Remove internal counseling-step labels if a small model echoes them."""
+    cleaned_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append(line)
+            continue
+
+        lowered = stripped.lower()
+        if "tôi đã tổng hợp những gì bạn" in lowered:
+            continue
+
+        for prefix in PROMPT_LEAK_PREFIXES:
+            if lowered.startswith(prefix.lower()):
+                remainder = stripped[len(prefix):].lstrip(" :：-–—?")
+                if remainder:
+                    cleaned_lines.append(remainder)
+                break
+        else:
+            cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines).strip()
+
 
 async def get_rag_service(request: Request) -> GraphRAGService:
     """Dependency to get pre-loaded RAG service instance from app.state"""
@@ -71,6 +110,9 @@ async def chat_completion(
         if conversation_id not in _conversations:
             _conversations[conversation_id] = []
 
+        if not formatted_history:
+            formatted_history = _conversations[conversation_id].copy()
+
         # Add current user message to history
         _conversations[conversation_id].append({
             "role": "user",
@@ -85,6 +127,7 @@ async def chat_completion(
             conversation_history=formatted_history
         ):
             full_response += chunk
+        full_response = remove_prompt_leakage(full_response)
 
         # Get retrieval context for sources
         context = getattr(rag_service, 'last_context', None)

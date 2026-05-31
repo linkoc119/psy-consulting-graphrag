@@ -4,23 +4,12 @@ Combines vector search (Qdrant) and graph traversal (Neo4j)
 """
 import logging
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from .llm_service import OllamaLLM
+from .llm_service import get_llm
 from .embedding_service import EmbeddingService
 from .reranker_service import RerankerService
 from .qdrant_service import QdrantService
 from .neo4j_service import Neo4jService
-from ..utils.prompts import (
-    SYSTEM_PROMPT_COUNSELING,
-    SYSTEM_PROMPT_CRISIS,
-    FEW_SHOT_COUNSELING,
-    FEW_SHOT_CRISIS,
-    TRIAGE_GUIDELINES
-)
-from config import settings
-from ..models.graph_schema import NODE_LABELS, get_schema_info
-
-TRIAGE_THRESHOLD_HIGH = settings.TRIAGE_THRESHOLD_HIGH
-TRIAGE_THRESHOLD_MEDIUM = settings.TRIAGE_THRESHOLD_MEDIUM
+from .prompt_builder import build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +27,11 @@ class GraphRAGService:
         """Initialize all services"""
         logger.info("Initializing GraphRAG services...")
 
-        # Initialize LLM
-        self.llm = OllamaLLM()
+        # Initialize configured LLM provider
+        self.llm = get_llm()
         connected = await self.llm.check_connection()
         if not connected:
-            raise RuntimeError("Ollama is not available. Please start Ollama and pull the model.")
+            raise RuntimeError("Configured LLM provider is not available. Check LLM_PROVIDER and API/model settings.")
 
         # Initialize embedding service
         self.embedding = EmbeddingService()
@@ -91,7 +80,7 @@ class GraphRAGService:
             self.last_context = context  # Store for sources
 
             # Phase 2: Triage & Prompt Building
-            prompt, system_prompt, severity = await self._build_prompt(query, context, conversation_history)
+            prompt, system_prompt, severity = build_prompt(query, context, conversation_history)
 
             # Phase 3: Generation
             import time
@@ -573,7 +562,9 @@ class GraphRAGService:
             "bạn bè", "bạn thân", "mâu thuẫn", "cãi nhau",
             "học tập", "thi cử", " điểm", "tương lai",
             "nghề nghiệp", "gia đình", "cha mẹ", "anh chị",
-            "tự tin", "self-esteem", "khả năng", "cảm thấy"
+            "tự tin", "self-esteem", "khả năng", "cảm thấy",
+            "mệt mỏi", "kiệt sức", "không muốn nói chuyện",
+            "cô đơn", "buồn", "chán nản", "mất động lực"
         ]
 
         # Combine current query with conversation history for better context
@@ -652,76 +643,6 @@ class GraphRAGService:
             "red_flags": detected,
             "has_crisis_keywords": len(detected) > 0
         }
-
-    async def _build_prompt(
-        self,
-        query: str,
-        context: Dict,
-        history: Optional[List[Dict]]
-    ) -> tuple:
-        """
-        Build dynamic prompt based on severity and context
-
-        Returns:
-            (prompt, system_prompt, severity_level)
-        """
-        severity = context["severity_indicators"]["level"]
-        documents = context["documents"]
-        graph_nodes = context["graph_nodes"]
-        relationships = context.get("relationships", [])
-
-        # Build context string (balanced for quality vs speed)
-        context_parts = []
-
-        # Add document context (3 docs, 300 chars each)
-        if documents:
-            context_parts.append("=== TÀI LIỆU THAM KHẢO ===")
-            for i, doc in enumerate(documents[:3], 1):
-                meta = doc["metadata"]
-                doc_type = meta.get("doc_type", "")
-                context_parts.append(f"[{i}] ({doc_type}) {doc['text'][:300]}...")
-
-        # Add graph nodes context (3 nodes, 200 chars each)
-        if graph_nodes:
-            context_parts.append("\n=== CÁC KHÁI NIỆM TRI THỨC LIÊN QUAN ===")
-            for i, node in enumerate(graph_nodes[:3], 1):
-                node_type = node.get("metadata", {}).get("node_type", "Unknown")
-                context_parts.append(f"[{i}] ({node_type}) {node['text'][:200]}...")
-
-        # Add relationships context (10 relationships)
-        if relationships:
-            context_parts.append("\n=== CÁC MỐI LIÊN KẾT TRI THỨC ===")
-            context_parts.append("(Các mối liên hệ quan trọng):")
-            for i, rel in enumerate(relationships[:10], 1):
-                context_parts.append(f"  {i}. {rel}")
-
-        context_str = "\n".join(context_parts) if context_parts else "Không có ngữ cảnh đặc biệt."
-
-        # Determine which system prompt to use
-        if severity >= TRIAGE_THRESHOLD_HIGH:
-            # Crisis mode - PFA
-            system_prompt = SYSTEM_PROMPT_CRISIS
-            few_shot = FEW_SHOT_CRISIS
-        else:
-            # Normal counseling mode
-            system_prompt = SYSTEM_PROMPT_COUNSELING
-            few_shot = FEW_SHOT_COUNSELING
-
-        # Build main prompt
-        prompt_parts = [
-            few_shot,
-            "\n=== NGỮ CẢNH ===",
-            context_str,
-            "\n=== CÂU HỎI CỦA NGƯỜI DÙNG ===",
-            query,
-            "\n=== PHẢN HỒI ==="
-        ]
-
-        prompt = "\n".join(prompt_parts)
-
-        logger.info(f"Built prompt with severity={severity}, using {'CRISIS' if severity>=4 else 'COUNSELING'} mode")
-
-        return prompt, system_prompt, severity
 
     async def close(self):
         """Close all connections"""
