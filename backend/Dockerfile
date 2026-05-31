@@ -13,8 +13,9 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install PyTorch with CUDA support
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch. CPU is the default; docker-compose.gpu.yml overrides this.
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX_URL}
 
 # Install remaining Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
