@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     ANTHROPIC_API_BASE: str = os.getenv("ANTHROPIC_API_BASE", "http://localhost:20128/v1")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
+    # OpenAI-compatible chat completions settings
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "http://host.docker.internal:20128/v1")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "cx/gpt-5.4")
+
     # Ollama settings
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct-q6_K") 
