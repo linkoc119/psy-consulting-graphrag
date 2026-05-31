@@ -4,7 +4,7 @@ Health check router - monitor system status
 import time
 import logging
 from typing import List, Dict
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from ..models.schemas import HealthCheckRequest, HealthCheckResponse, ServiceStatus
 
 logger = logging.getLogger(__name__)
@@ -176,20 +176,8 @@ async def health_check(request: HealthCheckRequest = Depends()):
 
 
 @router.get("/ready")
-async def readiness_check() -> Dict[str, str]:
-    """Simple readiness check for Kubernetes/load balancers"""
-    # Check critical services
-    try:
-        from ..services.llm_service import get_llm
-        llm = get_llm()
-        if not await llm.check_connection():
-            return {"status": "not ready", "reason": "ollama unavailable"}
-        
-        from ..services.qdrant_service import get_qdrant_service
-        qdrant = get_qdrant_service()
-        if not qdrant.get_collection_info():
-            return {"status": "not ready", "reason": "qdrant unavailable"}
-        
+async def readiness_check(request: Request) -> Dict[str, str]:
+    """Lightweight readiness check for Docker/Kubernetes probes."""
+    if hasattr(request.app.state, "rag_service"):
         return {"status": "ready"}
-    except Exception as e:
-        return {"status": "not ready", "reason": str(e)}
+    return {"status": "not ready", "reason": "rag service not initialized"}
