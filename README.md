@@ -79,26 +79,35 @@ Query → Embedding (1024-dim) → Query Classification
 
 ```bash
 git clone <your-repo>
-cd psychology-chatbot
-cp .env.example .env
-# Chỉnh sửa .env nếu cần (mặc định hợp lệ cho local)
+cd psy-consulting-graphrag
+# Backend reads configuration from backend/.env.
+# Chỉnh sửa backend/.env nếu cần (mặc định hợp lệ cho local)
 ```
 
-### Bước 2: Khởi động tất cả services
+### Bước 2: Khởi động infrastructure services
 
 ```bash
-# Build và khởi động tất cả services
-docker-compose up -d --build
+# CPU/default
+docker compose up -d ollama qdrant neo4j
 ```
 
-**Lần đầu tiên:** Backend sẽ pre-load ML models (embedding + reranker) trong startup → mất **5-10 phút**.
-Kiểm tra logs:
+Mặc định `docker-compose.yml` chạy bằng CPU, không yêu cầu NVIDIA runtime. Nếu máy có NVIDIA GPU và Docker đã hỗ trợ GPU, chạy thêm file override:
+
 ```bash
-docker-compose logs backend -f
-# Đợi dòng: "✅ All services initialized and models loaded - ready for instant response!"
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d ollama qdrant neo4j
 ```
 
-Dịch vụ sẽ được khởi động:
+Khi vừa sửa cấu hình Docker Compose hoặc chuyển giữa CPU/GPU mode, nên recreate container:
+
+```bash
+# CPU/default
+docker compose up -d --build --force-recreate
+
+# GPU
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build --force-recreate
+```
+
+Sau bước 4, các dịch vụ sẽ được khởi động:
 - Ollama (port 11434)
 - Qdrant (port 6333)
 - Neo4j (ports 7687, 7474)
@@ -108,18 +117,37 @@ Dịch vụ sẽ được khởi động:
 ### Bước 3: Pull model Qwen
 
 ```bash
-# Ollama sẽ tự động pull model khi container chạy lần đầu
-# Hoặc pull thủ công:
+# Pull model Qwen vào volume ollama_data
 docker exec psychology-ollama ollama pull qwen2.5:3b-instruct-q6_K
+
+# Check downloaded model
+docker exec psychology-ollama ollama list
 ```
 
-### Bước 4: Kiểm tra health
+### Bước 4: Khởi động backend và frontend
+
+```bash
+# CPU/default
+docker compose up -d --build
+
+# GPU
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
+**Lần đầu tiên:** Backend sẽ pre-load ML models (embedding + reranker) trong startup → mất **5-10 phút**.
+Kiểm tra logs:
+```bash
+docker compose logs backend -f
+# Đợi dòng: "✅ All services initialized and models loaded - ready for instant response!"
+```
+
+### Bước 5: Kiểm tra health
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-### Bước 5: Mở browser
+### Bước 6: Mở browser
 
 Truy cập: http://localhost:3000
 
@@ -191,12 +219,25 @@ docker exec psychology-backend python -m scripts.verify_graph
 # Clone và cài đặt nhanh
 
 git clone https://github.com/linkoc119/psy-consulting-graphrag.git
-cd psychology-chatbot
-cp .env.example .env
+cd psy-consulting-graphrag
+# Backend reads configuration from backend/.env.
 
 
-docker-compose up -d --build
+# Start infrastructure first
+docker compose up -d ollama qdrant neo4j
+
+# GPU optional
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d ollama qdrant neo4j
 docker exec psychology-ollama ollama pull qwen2.5:3b-instruct-q6_K
+
+# Start backend and frontend
+docker compose up -d --build
+
+# GPU optional
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+
+# Wait until backend is ready before indexing
+curl http://localhost:8000/health/ready
 
 # Run chunking and indexing
 docker exec psychology-backend python -m scripts.index_data --clear-db --rechunk
@@ -213,7 +254,7 @@ start http://localhost:3000  # Windows
 ## 📁 Cấu trúc project
 
 ```
-psychology-chatbot/
+psy-consulting-graphrag/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI app
@@ -232,6 +273,10 @@ psychology-chatbot/
 │   ├── chunking/
 │   │   └── chunk_processor.py   # PDF chunking
 │   ├── data/                    # Processed chunks
+│   ├── resources/               # PDF documents
+│   │   ├── pdtt.pdf
+│   │   ├── sctl.pdf
+│   │   └── tvtl.pdf
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -243,12 +288,8 @@ psychology-chatbot/
 │   │   └── index.jsx
 │   ├── Dockerfile
 │   └── package.json
-├── resources/                   # PDF documents
-│   ├── pdtt.pdf
-│   ├── sctl.pdf
-│   └── tvtl.pdf
-├── docker-compose.yml
-├── .env.example
+├── docker-compose.yml              # CPU/default deployment
+├── docker-compose.gpu.yml          # Optional NVIDIA GPU override
 └── README.md
 ```
 
@@ -258,6 +299,7 @@ psychology-chatbot/
 |----------|--------|-------|
 | `/` | GET | API info |
 | `/health` | GET | Health check |
+| `/health/ready` | GET | Readiness check |
 | `/chat/completion` | POST | Send chat message |
 | `/chat/conversation/{id}` | GET | Get conversation history |
 | `/chat/conversation/{id}` | DELETE | Delete conversation |
@@ -286,10 +328,10 @@ npm start
 
 ```bash
 # Backend logs
-docker-compose logs -f backend
+docker compose logs -f backend
 
 # Frontend logs
-docker-compose logs -f frontend
+docker compose logs -f frontend
 ```
 
 ## ⚠️ Lưu ý quan trọng
