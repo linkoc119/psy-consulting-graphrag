@@ -13,6 +13,7 @@ Hệ thống chatbot tư vấn tâm lý học đường sử dụng kiến trúc
 - **Tìm kiếm ngữ nghĩa (Vector Search)**: Truy xuất tài liệu liên quan
 - **Reranking thông minh**: Lọc và ưu tiên thông tin quan trọng nhất
 - **Streaming response**: Phản hồi theo thời gian thực
+- **Configurable LLM provider**: Có thể chọn Ollama local, OpenAI-compatible API hoặc Claude-compatible provider qua `backend/.env`
 
 ### GraphRAG Pipeline
 
@@ -29,15 +30,15 @@ Query → Embedding (1024-dim) → Query Classification
                                 ↓
                         Reranking (top 3)
                                 ↓
-                 LLM Generation (Qwen 2.5-3B)
+                 LLM Generation (configured provider)
 ```
 
 ## Kiến trúc
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   React UI     │────│   FastAPI      │────│   Ollama       │
-│   (Port 3000)   │    │   (Port 8000)  │    │   Qwen 2.5-3B  │
+│   React UI     │────│   FastAPI      │────│ LLM Provider   │
+│   (Port 3000)   │    │   (Port 8000)  │    │ Ollama/API     │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                                  │
                     ┌────────────┼────────────┐
@@ -59,7 +60,7 @@ Query → Embedding (1024-dim) → Query Classification
 
 | Thành phần | Công nghệ | Mô tả |
 |------------|-----------|-------|
-| **LLM** | Qwen 2.5-3B (Ollama) | Mô hình ngôn ngữ chạy local (`qwen2.5:3b-instruct-q6_K`) |
+| **LLM** | Ollama / OpenAI-compatible / Claude-compatible | Cấu hình bằng `LLM_PROVIDER` trong `backend/.env` |
 | **Vector DB** | Qdrant | Lưu trữ embeddings 1024-dim và tìm kiếm cosine |
 | **Graph DB** | Neo4j | Lưu trữ knowledge graph với APOC |
 | **Embedding** | AITeamVN/Vietnamese_Embedding | Mô hình nhúng tiếng Việt (1024-dim) |
@@ -91,20 +92,27 @@ cd psy-consulting-graphrag
 docker compose up -d ollama qdrant neo4j
 ```
 
-Mặc định `docker-compose.yml` chạy bằng CPU, không yêu cầu NVIDIA runtime. Nếu máy có NVIDIA GPU và Docker đã hỗ trợ GPU, chạy thêm file override:
+Mặc định `docker-compose.yml` chạy bằng CPU, không yêu cầu NVIDIA runtime. Nếu máy có NVIDIA GPU và Docker đã hỗ trợ GPU, có 2 lựa chọn override:
 
 ```bash
+# GPU full: backend retrieval/reranker + Ollama đều có GPU
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d ollama qdrant neo4j
+
+# Hybrid: retrieval/backend CPU, Ollama LLM GPU
+docker compose -f docker-compose.yml -f docker-compose.hybrid.yml up -d ollama qdrant neo4j
 ```
 
-Khi vừa sửa cấu hình Docker Compose hoặc chuyển giữa CPU/GPU mode, nên recreate container:
+Khi vừa sửa cấu hình Docker Compose hoặc chuyển giữa CPU/GPU/Hybrid mode, nên recreate container:
 
 ```bash
 # CPU/default
 docker compose up -d --build --force-recreate
 
-# GPU
+# GPU full
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build --force-recreate
+
+# Hybrid: retrieval CPU, LLM GPU
+docker compose -f docker-compose.yml -f docker-compose.hybrid.yml up -d --build --force-recreate
 ```
 
 Sau bước 4, các dịch vụ sẽ được khởi động:
@@ -132,6 +140,9 @@ docker compose up -d --build
 
 # GPU
 # docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+
+# Hybrid: retrieval CPU, LLM GPU
+# docker compose -f docker-compose.yml -f docker-compose.hybrid.yml up -d --build
 ```
 
 **Lần đầu tiên:** Backend sẽ pre-load ML models (embedding + reranker) trong startup → mất **5-10 phút**.
@@ -145,7 +156,10 @@ docker compose logs backend -f
 
 ```bash
 curl http://localhost:8000/health
+curl http://localhost:8000/health/ready
 ```
+
+`/health/ready` là readiness check nhẹ dùng cho Docker healthcheck. `/health` là deep health check cho LLM/Qdrant/Neo4j.
 
 ### Bước 6: Mở browser
 
@@ -228,6 +242,10 @@ docker compose up -d ollama qdrant neo4j
 
 # GPU optional
 # docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d ollama qdrant neo4j
+
+# Hybrid optional: retrieval/backend CPU, Ollama LLM GPU
+# docker compose -f docker-compose.yml -f docker-compose.hybrid.yml up -d ollama qdrant neo4j
+
 docker exec psychology-ollama ollama pull qwen2.5:3b-instruct-q6_K
 
 # Start backend and frontend
@@ -235,6 +253,9 @@ docker compose up -d --build
 
 # GPU optional
 # docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+
+# Hybrid optional
+# docker compose -f docker-compose.yml -f docker-compose.hybrid.yml up -d --build
 
 # Wait until backend is ready before indexing
 curl http://localhost:8000/health/ready
@@ -262,11 +283,12 @@ psy-consulting-graphrag/
 │   │   ├── models/              # Pydantic schemas
 │   │   ├── routers/             # API endpoints
 │   │   ├── services/            # Business logic
-│   │   │   ├── llm_service.py       # Ollama integration
+│   │   │   ├── llm_service.py       # LLM provider integration
 │   │   │   ├── embedding_service.py # Vietnamese embedding
 │   │   │   ├── reranker_service.py  # Vietnamese reranker
 │   │   │   ├── qdrant_service.py    # Vector DB ops
 │   │   │   ├── neo4j_service.py     # Graph DB ops
+│   │   │   ├── prompt_builder.py    # Prompt construction
 │   │   │   └── rag_service.py       # Core GraphRAG logic
 │   │   └── utils/
 │   │       └── prompts.py       # Prompt templates
@@ -290,6 +312,7 @@ psy-consulting-graphrag/
 │   └── package.json
 ├── docker-compose.yml              # CPU/default deployment
 ├── docker-compose.gpu.yml          # Optional NVIDIA GPU override
+├── docker-compose.hybrid.yml       # Retrieval CPU + Ollama GPU override
 └── README.md
 ```
 
@@ -298,8 +321,8 @@ psy-consulting-graphrag/
 | Endpoint | Method | Mô tả |
 |----------|--------|-------|
 | `/` | GET | API info |
-| `/health` | GET | Health check |
-| `/health/ready` | GET | Readiness check |
+| `/health` | GET | Deep health check |
+| `/health/ready` | GET | Lightweight readiness check |
 | `/chat/completion` | POST | Send chat message |
 | `/chat/conversation/{id}` | GET | Get conversation history |
 | `/chat/conversation/{id}` | DELETE | Delete conversation |
@@ -343,8 +366,7 @@ docker compose logs -f frontend
 5. **Văn hóa**: Phản hồi phải phù hợp với văn hóa Việt Nam và lứa tuổi
 6. **Performance:**
    - Backend startup: 5-10 phút (pre-load ML models)
-   - Response time: 40-60 giây với LLM_MAX_TOKENS=512 trên CPU
-   - ~20-30 giây với NVIDIA GPU (RTX 3060+)
+   - Response time phụ thuộc vào LLM provider, CPU/GPU mode và retrieval/reranker (20-30s)
    - GPU auto-detection cho reranker
 
 ## 📄 License
